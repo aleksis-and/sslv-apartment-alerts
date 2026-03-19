@@ -141,5 +141,4 @@ def main():
 
 
 if __name__ == "__main__":
-    send_telegram_message("Test message from GitHub Actions")
     main()
