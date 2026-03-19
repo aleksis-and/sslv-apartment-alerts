@@ -47,68 +47,111 @@ def send_telegram_message(text):
     response.raise_for_status()
 
 
-def parse_price(text):
-    # Examples: 178,000 € / 178000 € / 178 000 €
-    match = re.search(r"(\d[\d\s.,]*)\s*€", text)
-    if not match:
-        return None
-
-    raw = match.group(1)
-    raw = raw.replace(" ", "").replace(",", "").replace(".", "")
-
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
-def parse_rooms(text):
-    text = text.lower()
-
-    patterns = [
-        r"(\d+)\s*[- ]?ist",
-        r"istabas[: ]+(\d+)",
-        r"komn\.?[: ]+(\d+)",
-        r"rooms?[: ]+(\d+)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                pass
-
-    return None
-
-
 def listing_id(entry):
     return entry.get("id") or entry.get("link") or entry.get("title")
 
 
-def extract_text(entry):
-    parts = [
-        entry.get("title", ""),
-        entry.get("summary", ""),
-        entry.get("description", ""),
-    ]
-    return " | ".join(parts)
+def normalize_int(value):
+    if value is None:
+        return None
+    value = value.replace(" ", "").replace(",", "").replace(".", "")
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
-def qualifies(entry):
-    text = extract_text(entry)
-    price = parse_price(text)
-    rooms = parse_rooms(text)
+def extract_field(text, label):
+    # Works on flattened HTML text like "Istabas: 4 Platība: 93 m² Cena: 178 000 €"
+    patterns = {
+        "rooms": [
+            r"Istabas:\s*(\d+)",
+        ],
+        "area": [
+            r"Platība:\s*(\d+(?:[.,]\d+)?)\s*m[²2]",
+        ],
+        "price": [
+            r"Cena:\s*([\d\s.,]+)\s*€",
+        ],
+        "floor": [
+            r"Stāvs:\s*([^\s]+)",
+        ],
+        "street": [
+            r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)",
+        ],
+    }
 
-    print(f"TITLE: {entry.get('title', '')}")
-    print(f"PARSED PRICE: {price}, PARSED ROOMS: {rooms}")
+    for pattern in patterns.get(label, []):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def fetch_listing_details(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "lv,en;q=0.9",
+    }
+
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    html = response.text
+
+    title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
+
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"&nbsp;|&#160;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    rooms_raw = extract_field(text, "rooms")
+    area_raw = extract_field(text, "area")
+    price_raw = extract_field(text, "price")
+    floor_raw = extract_field(text, "floor")
+    street_raw = extract_field(text, "street")
+
+    rooms = int(rooms_raw) if rooms_raw and rooms_raw.isdigit() else None
+    area = float(area_raw.replace(",", ".")) if area_raw else None
+    price = normalize_int(price_raw)
+
+    details = {
+        "title": title,
+        "rooms": rooms,
+        "area": area,
+        "price": price,
+        "floor": floor_raw,
+        "street": street_raw,
+        "url": url,
+    }
+
+    print(f"DETAILS: {details}")
+    return details
+
+
+def qualifies(details):
+    price = details.get("price")
+    rooms = details.get("rooms")
 
     if price is None or rooms is None:
-        return False, price, rooms
+        return False
 
-    ok = rooms >= MIN_ROOMS and MIN_PRICE <= price <= MAX_PRICE
-    return ok, price, rooms
+    return rooms >= MIN_ROOMS and MIN_PRICE <= price <= MAX_PRICE
+
+
+def format_price(price):
+    if price is None:
+        return "N/A"
+    return f"€{price:,}".replace(",", " ")
+
+
+def format_area(area):
+    if area is None:
+        return "N/A"
+    if float(area).is_integer():
+        return f"{int(area)} m²"
+    return f"{area:.1f} m²"
 
 
 def main():
@@ -122,20 +165,17 @@ def main():
 
         for entry in feed.entries:
             item_id = listing_id(entry)
+            link = entry.get("link", "")
+
             if not item_id or item_id in seen:
                 continue
 
-            ok, price, rooms = qualifies(entry)
-
-            if ok:
-                matches.append(
-                    {
-                        "title": entry.get("title", "New listing"),
-                        "rooms": rooms,
-                        "price": price,
-                        "link": entry.get("link", ""),
-                    }
-                )
+            try:
+                details = fetch_listing_details(link)
+                if qualifies(details):
+                    matches.append(details)
+            except Exception as e:
+                print(f"Failed to parse listing {link}: {e}")
 
             new_seen.add(item_id)
 
@@ -146,8 +186,11 @@ def main():
             message += (
                 f"{i}. {match['title']}\n"
                 f"• Rooms: {match['rooms']}\n"
-                f"• Price: €{match['price']}\n"
-                f"• Link: {match['link']}\n\n"
+                f"• Price: {format_price(match['price'])}\n"
+                f"• Area: {format_area(match['area'])}\n"
+                f"• Floor: {match['floor'] or 'N/A'}\n"
+                f"• Address: {match['street'] or 'N/A'}\n"
+                f"• Link: {match['url']}\n\n"
             )
 
         send_telegram_message(message.strip())
