@@ -1,8 +1,9 @@
 import json
 import re
 from pathlib import Path
-import requests
+
 import feedparser
+import requests
 
 FEEDS = [
     "https://www.ss.com/lv/real-estate/flats/riga-region/adazu-nov/sell/rss/",
@@ -29,7 +30,7 @@ def load_seen():
 
 
 def save_seen(seen):
-    SEEN_FILE.write_text(json.dumps(sorted(seen)))
+    SEEN_FILE.write_text(json.dumps(sorted(seen), ensure_ascii=False, indent=2))
 
 
 def send_telegram_message(text):
@@ -47,13 +48,14 @@ def send_telegram_message(text):
 
 
 def parse_price(text):
-    # Example: 178,000 € or 178000 €
-    m = re.search(r"(\d[\d\s.,]*)\s*€", text)
-    if not m:
+    # Examples: 178,000 € / 178000 € / 178 000 €
+    match = re.search(r"(\d[\d\s.,]*)\s*€", text)
+    if not match:
         return None
 
-    raw = m.group(1)
+    raw = match.group(1)
     raw = raw.replace(" ", "").replace(",", "").replace(".", "")
+
     try:
         return int(raw)
     except ValueError:
@@ -71,10 +73,10 @@ def parse_rooms(text):
     ]
 
     for pattern in patterns:
-        m = re.search(pattern, text)
-        if m:
+        match = re.search(pattern, text)
+        if match:
             try:
-                return int(m.group(1))
+                return int(match.group(1))
             except ValueError:
                 pass
 
@@ -99,21 +101,23 @@ def qualifies(entry):
     price = parse_price(text)
     rooms = parse_rooms(text)
 
+    print(f"TITLE: {entry.get('title', '')}")
+    print(f"PARSED PRICE: {price}, PARSED ROOMS: {rooms}")
+
     if price is None or rooms is None:
         return False, price, rooms
 
-    ok = (
-        rooms >= MIN_ROOMS and
-        MIN_PRICE <= price <= MAX_PRICE
-    )
+    ok = rooms >= MIN_ROOMS and MIN_PRICE <= price <= MAX_PRICE
     return ok, price, rooms
 
 
 def main():
     seen = load_seen()
     new_seen = set(seen)
+    matches = []
 
     for feed_url in FEEDS:
+        print(f"Checking feed: {feed_url}")
         feed = feedparser.parse(feed_url)
 
         for entry in feed.entries:
@@ -124,18 +128,31 @@ def main():
             ok, price, rooms = qualifies(entry)
 
             if ok:
-                title = entry.get("title", "New listing")
-                link = entry.get("link", "")
-                message = (
-                    "New SS.lv apartment match!\n\n"
-                    f"{title}\n"
-                    f"Rooms: {rooms}\n"
-                    f"Price: €{price}\n"
-                    f"{link}"
+                matches.append(
+                    {
+                        "title": entry.get("title", "New listing"),
+                        "rooms": rooms,
+                        "price": price,
+                        "link": entry.get("link", ""),
+                    }
                 )
-                send_telegram_message(message)
 
             new_seen.add(item_id)
+
+    if matches:
+        message = "🏠 New SS.lv apartment matches\n\n"
+
+        for i, match in enumerate(matches, start=1):
+            message += (
+                f"{i}. {match['title']}\n"
+                f"• Rooms: {match['rooms']}\n"
+                f"• Price: €{match['price']}\n"
+                f"• Link: {match['link']}\n\n"
+            )
+
+        send_telegram_message(message.strip())
+    else:
+        print("No new matching listings found.")
 
     save_seen(new_seen)
 
