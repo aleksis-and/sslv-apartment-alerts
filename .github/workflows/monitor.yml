@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "*/10 * * * *"
 
+concurrency:
+  group: sslv-apartment-alerts
+  cancel-in-progress: false
+
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
