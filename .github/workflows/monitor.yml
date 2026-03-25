@@ -3,7 +3,7 @@ name: SS.lv apartment monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,17,27,37,47,57 * * * *"
+    - cron: "7,37 * * * *"
 
 concurrency:
   group: sslv-apartment-alerts
