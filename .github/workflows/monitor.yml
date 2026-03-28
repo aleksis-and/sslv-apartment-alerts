@@ -30,6 +30,9 @@ jobs:
 
       - name: Run monitor
         run: python monitor.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
 
       - name: Commit updated seen_ids.json
         run: |
