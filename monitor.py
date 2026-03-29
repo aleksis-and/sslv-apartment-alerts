@@ -160,16 +160,16 @@ def main():
                     matches.append(listing)
 
         if matches:
-            message = "🏠 New SS.lv apartment matches\n\n"
+            message = "🏠 Jauni SS.lv dzīvokļi pēc taviem kritērijiem\n\n"
             for i, match in enumerate(matches, start=1):
                 message += (
                     f"{i}. {match['title']}\n"
-                    f"• Rooms: {match['rooms']}\n"
-                    f"• Price: {format_price(match['price'])}\n"
-                    f"• Area: {format_area(match['area'])}\n"
-                    f"• Floor: {match['floor'] or 'N/A'}\n"
-                    f"• Address: {match['street'] or 'N/A'}\n"
-                    f"• Link: {match['url']}\n\n"
+                    f"• Istabas: {match['rooms']}\n"
+                    f"• Cena: {format_price(match['price'])}\n"
+                    f"• Platība: {format_area(match['area'])}\n"
+                    f"• Stāvs: {match['floor'] or 'Nav'}\n"
+                    f"• Adrese: {match['street'] or 'Nav'}\n"
+                    f"• Saite: {match['url']}\n\n"
                 )
             send_telegram_message(bot_token, chat_id, message.strip())
             print(f"Sent {len(matches)} matches to {chat_id}")
