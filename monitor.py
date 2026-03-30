@@ -12,14 +12,34 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DISTRICT_FEEDS = {
+    # Rīga rajoni
     "riga": "https://www.ss.lv/lv/real-estate/flats/riga/all/sell/rss/",
-    "jugla": "https://www.ss.lv/lv/real-estate/flats/riga/jugla/sell/rss/",
+    "centrs": "https://www.ss.lv/lv/real-estate/flats/riga/centre/sell/rss/",
+    "agenskalns": "https://www.ss.lv/lv/real-estate/flats/riga/agenskalns/sell/rss/",
     "purvciems": "https://www.ss.lv/lv/real-estate/flats/riga/purvciems/sell/rss/",
+    "teika": "https://www.ss.lv/lv/real-estate/flats/riga/teika/sell/rss/",
+    "plavnieki": "https://www.ss.lv/lv/real-estate/flats/riga/plavnieki/sell/rss/",
     "imanta": "https://www.ss.lv/lv/real-estate/flats/riga/imanta/sell/rss/",
-    "kengarags": "https://www.ss.lv/lv/real-estate/flats/riga/kengarags/sell/rss/",
+    "jugla": "https://www.ss.lv/lv/real-estate/flats/riga/jugla/sell/rss/",
     "mezciems": "https://www.ss.lv/lv/real-estate/flats/riga/mezciems/sell/rss/",
+    "kengarags": "https://www.ss.lv/lv/real-estate/flats/riga/kengarags/sell/rss/",
+    "zolitude": "https://www.ss.lv/lv/real-estate/flats/riga/zolitude/sell/rss/",
+    "bolderaja": "https://www.ss.lv/lv/real-estate/flats/riga/bolderaja/sell/rss/",
+    "ilguciems": "https://www.ss.lv/lv/real-estate/flats/riga/ilguciems/sell/rss/",
+    "pardaugava": "https://www.ss.lv/lv/real-estate/flats/riga/pardaugava/sell/rss/",
+    # Rīgas rajons
     "adazu-nov": "https://www.ss.lv/lv/real-estate/flats/riga-region/adazu-nov/sell/rss/",
     "sigulda": "https://www.ss.lv/lv/real-estate/flats/riga-region/sigulda/sell/rss/",
+    "salaspils": "https://www.ss.lv/lv/real-estate/flats/riga-region/salaspils/sell/rss/",
+    "marupe": "https://www.ss.lv/lv/real-estate/flats/riga-region/marupe/sell/rss/",
+    "olaine": "https://www.ss.lv/lv/real-estate/flats/riga-region/olaine/sell/rss/",
+    "stopini": "https://www.ss.lv/lv/real-estate/flats/riga-region/stopini/sell/rss/",
+    # Citas pilsētas
+    "jurmala": "https://www.ss.lv/lv/real-estate/flats/jurmala/all/sell/rss/",
+    "jelgava": "https://www.ss.lv/lv/real-estate/flats/jelgava-and-district/jelgava/sell/rss/",
+    "liepaja": "https://www.ss.lv/lv/real-estate/flats/liepaja-and-district/liepaja/sell/rss/",
+    "daugavpils": "https://www.ss.lv/lv/real-estate/flats/daugavpils-and-district/daugavpils/sell/rss/",
+    "ventspils": "https://www.ss.lv/lv/real-estate/flats/ventspils-and-district/ventspils/sell/rss/",
 }
 
 def load_seen():
