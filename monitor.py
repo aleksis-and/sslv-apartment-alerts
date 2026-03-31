@@ -1,18 +1,22 @@
 import json
 import re
 import os
+import time
+import logging
 from supabase import create_client
-
+from apscheduler.schedulers.blocking import BlockingScheduler
 import feedparser
 import requests
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DISTRICT_FEEDS = {
-    # Rīga rajoni
     "riga": "https://www.ss.lv/lv/real-estate/flats/riga/all/sell/rss/",
     "centrs": "https://www.ss.lv/lv/real-estate/flats/riga/centre/sell/rss/",
     "agenskalns": "https://www.ss.lv/lv/real-estate/flats/riga/agenskalns/sell/rss/",
@@ -27,14 +31,12 @@ DISTRICT_FEEDS = {
     "bolderaja": "https://www.ss.lv/lv/real-estate/flats/riga/bolderaja/sell/rss/",
     "ilguciems": "https://www.ss.lv/lv/real-estate/flats/riga/ilguciems/sell/rss/",
     "pardaugava": "https://www.ss.lv/lv/real-estate/flats/riga/pardaugava/sell/rss/",
-    # Rīgas rajons
     "adazu-nov": "https://www.ss.lv/lv/real-estate/flats/riga-region/adazu-nov/sell/rss/",
     "sigulda": "https://www.ss.lv/lv/real-estate/flats/riga-region/sigulda/sell/rss/",
     "salaspils": "https://www.ss.lv/lv/real-estate/flats/riga-region/salaspils/sell/rss/",
     "marupe": "https://www.ss.lv/lv/real-estate/flats/riga-region/marupe/sell/rss/",
     "olaine": "https://www.ss.lv/lv/real-estate/flats/riga-region/olaine/sell/rss/",
     "stopini": "https://www.ss.lv/lv/real-estate/flats/riga-region/stopini/sell/rss/",
-    # Citas pilsētas
     "jurmala": "https://www.ss.lv/lv/real-estate/flats/jurmala/all/sell/rss/",
     "jelgava": "https://www.ss.lv/lv/real-estate/flats/jelgava-and-district/jelgava/sell/rss/",
     "liepaja": "https://www.ss.lv/lv/real-estate/flats/liepaja-and-district/liepaja/sell/rss/",
@@ -43,19 +45,18 @@ DISTRICT_FEEDS = {
 }
 
 def load_seen():
-    try:
-        with open("seen_ids.json") as f:
-            return set(json.load(f))
-    except Exception:
-        return set()
+    result = supabase.table("seen_listings").select("id").execute()
+    return set(row["id"] for row in result.data)
 
-def save_seen(seen):
-    with open("seen_ids.json", "w") as f:
-        json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
+def save_seen(new_ids):
+    if not new_ids:
+        return
+    rows = [{"id": id} for id in new_ids]
+    supabase.table("seen_listings").upsert(rows).execute()
 
-def send_telegram_message(bot_token, chat_id, text):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
+def send_telegram_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=30)
 
 def normalize_int(value):
     if value is None:
@@ -111,40 +112,40 @@ def fetch_listing_details(url):
 
 def format_price(price):
     if price is None:
-        return "N/A"
+        return "Nav"
     return f"€{price:,}".replace(",", " ")
 
 def format_area(area):
     if area is None:
-        return "N/A"
+        return "Nav"
     if float(area).is_integer():
         return f"{int(area)} m²"
     return f"{area:.1f} m²"
 
-def main():
-    bot_token = os.environ["BOT_TOKEN"]
+def run():
+    logging.info("Starting monitor run...")
 
-    # Fetch all active users from Supabase
     result = supabase.table("users").select("*").eq("active", True).execute()
     users = result.data
-    print(f"Found {len(users)} active users")
+    logging.info(f"Found {len(users)} active users")
+
+    if not users:
+        return
 
     seen = load_seen()
-    new_seen = set(seen)
+    new_seen = set()
 
-    # Collect all unique districts needed
     all_districts = set()
     for user in users:
         for d in user.get("districts", []):
             all_districts.add(d)
 
-    # Fetch listings per district
     district_listings = {}
     for district in all_districts:
         feed_url = DISTRICT_FEEDS.get(district)
         if not feed_url:
             continue
-        print(f"Checking feed: {feed_url}")
+        logging.info(f"Checking feed: {feed_url}")
         feed = feedparser.parse(feed_url)
         listings = []
         for entry in feed.entries:
@@ -156,12 +157,12 @@ def main():
                 details = fetch_listing_details(link)
                 details["item_id"] = item_id
                 listings.append(details)
+                new_seen.add(item_id)
             except Exception as e:
-                print(f"Failed to parse {link}: {e}")
-            new_seen.add(item_id)
+                logging.error(f"Failed to parse {link}: {e}")
+                new_seen.add(item_id)
         district_listings[district] = listings
 
-    # Match listings to users and send alerts
     for user in users:
         chat_id = user["chat_id"]
         min_price = user["min_price"]
@@ -180,7 +181,7 @@ def main():
                     matches.append(listing)
 
         if matches:
-            message = "🏠 Jauni SS.lv dzīvokļi pēc taviem kritērijiem\n\n"
+            message = "🏠 *Jauni SS.lv dzīvokļi pēc taviem kritērijiem*\n\n"
             for i, match in enumerate(matches, start=1):
                 message += (
                     f"{i}. {match['title']}\n"
@@ -191,12 +192,16 @@ def main():
                     f"• Adrese: {match['street'] or 'Nav'}\n"
                     f"• Saite: {match['url']}\n\n"
                 )
-            send_telegram_message(bot_token, chat_id, message.strip())
-            print(f"Sent {len(matches)} matches to {chat_id}")
+            send_telegram_message(chat_id, message.strip())
+            logging.info(f"Sent {len(matches)} matches to {chat_id}")
         else:
-            print(f"No matches for {chat_id}")
+            logging.info(f"No matches for {chat_id}")
 
     save_seen(new_seen)
+    logging.info("Run complete.")
 
 if __name__ == "__main__":
-    main()
+    scheduler = BlockingScheduler()
+    scheduler.add_job(run, 'interval', minutes=30, next_run_time=__import__('datetime').datetime.now())
+    logging.info("Scheduler started — running every 30 minutes.")
+    scheduler.start()
