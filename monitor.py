@@ -265,7 +265,6 @@ def run():
     seen = load_seen()
     new_seen = set()
 
-    # Group users by category+intent combination
     groups = {}
     for user in users:
         category = user.get("category", "apartment")
@@ -277,17 +276,17 @@ def run():
         for d in user.get("districts", []):
             groups[key]["districts"].add(d)
 
-    # Fetch listings per group
     group_listings = {}
     for key, group in groups.items():
         group_listings[key] = fetch_feeds(group["districts"], group["feeds"], seen, new_seen)
 
-    # Send alerts
     for user in users:
         chat_id = user["chat_id"]
-        min_price = user["min_price"]
-        max_price = user["max_price"]
-        min_rooms = user["min_rooms"]
+        min_price = user.get("min_price", 0)
+        max_price = user.get("max_price", 9999999)
+        min_area = user.get("min_area", 0)
+        max_area = user.get("max_area", 9999)
+        user_rooms = user.get("rooms") or []
         user_districts = user.get("districts", [])
         category = user.get("category", "apartment")
         intent = user.get("intent", "buy")
@@ -299,10 +298,16 @@ def run():
             for listing in listings_source.get(district, []):
                 price = listing.get("price")
                 rooms = listing.get("rooms")
+                area = listing.get("area")
                 if price is None or rooms is None:
                     continue
-                if rooms >= min_rooms and min_price <= price <= max_price:
-                    matches.append(listing)
+                if user_rooms and rooms not in user_rooms:
+                    continue
+                if not (min_price <= price <= max_price):
+                    continue
+                if area is not None and not (min_area <= area <= max_area):
+                    continue
+                matches.append(listing)
 
         if matches:
             category_lv = "dzīvokļi" if category == "apartment" else "mājas"
