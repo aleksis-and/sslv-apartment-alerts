@@ -1,4 +1,3 @@
-import json
 import re
 import os
 import logging
@@ -148,6 +147,82 @@ HOUSE_BUY_FEEDS = {
 }
 
 HOUSE_RENT_FEEDS = {k: v.replace("/sell/", "/hand_over/") for k, v in HOUSE_BUY_FEEDS.items()}
+
+DISTRICT_NAMES = {
+    "riga": "Rīga (visi rajoni)",
+    "centrs": "Centrs",
+    "agenskalns": "Āgenskalns",
+    "aplokciems": "Aplokciems",
+    "bergi": "Berģi",
+    "bierini": "Bieriņi",
+    "bolderaja": "Bolderāja",
+    "breksi": "Brekši",
+    "ciekurkalns": "Čiekurkalns",
+    "darzciems": "Dārzciems",
+    "daugavgriva": "Daugavgrīva",
+    "dreilini": "Dreiliņi",
+    "dzeguzkalns": "Dzegužkalns",
+    "grizinkalns": "Grīziņkalns",
+    "ilguciems": "Iļģuciems",
+    "imanta": "Imanta",
+    "jaunciems": "Jaunciems",
+    "jugla": "Jugla",
+    "kengarags": "Ķengarags",
+    "kipsala": "Ķīpsala",
+    "kliversala": "Klīversala",
+    "krasta-r-ns": "Krasta rajons",
+    "latgales-priekspilseta": "Latgales priekšpilsēta",
+    "mangali": "Mangaļi",
+    "mezaparks": "Mežaparks",
+    "mezciems": "Mežciems",
+    "plavnieki": "Pļavnieki",
+    "purvciems": "Purvciems",
+    "sarkandaugava": "Sarkandaugava",
+    "sampeteris": "Šampēteris",
+    "teika": "Teika",
+    "tornakalns": "Torņakalns",
+    "vecaki": "Vecāķi",
+    "vecmilgravis": "Vecmīlgrāvis",
+    "vecriga": "Vecrīga",
+    "ziepniekkalns": "Ziepniekkalns",
+    "zolitude": "Zolitūde",
+    "pardaugava": "Pārdaugava",
+    "zasulauks": "Zasulauks",
+    "vef": "VEF",
+    "jurmala": "Jūrmala",
+    "riga-region": "Rīgas rajons",
+    "adazu-nov": "Ādaži",
+    "sigulda": "Sigulda",
+    "salaspils": "Salaspils",
+    "marupe": "Mārupes pag.",
+    "olaine": "Olaine",
+    "stopini": "Stopiņi",
+    "aizkraukle-and-reg": "Aizkraukle un rajons",
+    "aluksne-and-reg": "Alūksne un rajons",
+    "balvi-and-reg": "Balvi un rajons",
+    "bauska-and-reg": "Bauska un rajons",
+    "cesis-and-reg": "Cēsis un rajons",
+    "daugavpils-and-reg": "Daugavpils un rajons",
+    "dobele-and-reg": "Dobele un rajons",
+    "gulbene-and-reg": "Gulbene un rajons",
+    "jekabpils-and-reg": "Jēkabpils un rajons",
+    "jelgava-and-reg": "Jelgava un rajons",
+    "kraslava-and-reg": "Krāslava un rajons",
+    "kuldiga-and-reg": "Kuldīga un rajons",
+    "liepaja-and-reg": "Liepāja un rajons",
+    "limbadzi-and-reg": "Limbaži un rajons",
+    "ludza-and-reg": "Ludza un rajons",
+    "madona-and-reg": "Madona un rajons",
+    "ogre-and-reg": "Ogre un rajons",
+    "preili-and-reg": "Preiļi un rajons",
+    "rezekne-and-reg": "Rēzekne un rajons",
+    "saldus-and-reg": "Saldus un rajons",
+    "talsi-and-reg": "Talsi un rajons",
+    "tukums-and-reg": "Tukums un rajons",
+    "valka-and-reg": "Valka un rajons",
+    "valmiera-and-reg": "Valmiera un rajons",
+    "ventspils-and-reg": "Ventspils un rajons",
+}
 
 def load_seen():
     result = supabase.table("seen_listings").select("id").execute()
@@ -312,11 +387,14 @@ def run():
         if matches:
             category_lv = "dzīvokļi" if category == "apartment" else "mājas"
             intent_lv = "pārdošanā" if intent == "buy" else "īrei"
-            message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n\n"
+            district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
+            message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n"
+            message += f"📍 {district_names}\n\n"
             for i, match in enumerate(matches, start=1):
+                rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
                 message += (
                     f"{i}. {match['title']}\n"
-                    f"• Istabas: {match['rooms']}\n"
+                    f"• Istabas: {rooms_str}\n"
                     f"• Cena: {format_price(match['price'])}\n"
                     f"• Platība: {format_area(match['area'])}\n"
                     f"• Stāvs: {match['floor'] or 'Nav'}\n"
