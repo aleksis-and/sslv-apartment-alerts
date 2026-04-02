@@ -1,7 +1,6 @@
 import json
 import re
 import os
-import time
 import logging
 from supabase import create_client
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -42,6 +41,25 @@ DISTRICT_FEEDS = {
     "liepaja": "https://www.ss.lv/lv/real-estate/flats/liepaja-and-district/liepaja/sell/rss/",
     "daugavpils": "https://www.ss.lv/lv/real-estate/flats/daugavpils-and-district/daugavpils/sell/rss/",
     "ventspils": "https://www.ss.lv/lv/real-estate/flats/ventspils-and-district/ventspils/sell/rss/",
+}
+
+HOUSE_FEEDS = {
+    "riga": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/sell/rss/",
+    "centrs": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/centre/sell/rss/",
+    "agenskalns": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/agenskalns/sell/rss/",
+    "purvciems": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/purvciems/sell/rss/",
+    "imanta": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/imanta/sell/rss/",
+    "jugla": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/jugla/sell/rss/",
+    "adazu-nov": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/adazu-nov/sell/rss/",
+    "sigulda": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/sigulda/sell/rss/",
+    "salaspils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/salaspils/sell/rss/",
+    "marupe": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/marupe/sell/rss/",
+    "olaine": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/olaine/sell/rss/",
+    "jurmala": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jurmala/all/sell/rss/",
+    "jelgava": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jelgava-and-district/jelgava/sell/rss/",
+    "liepaja": "https://www.ss.lv/lv/real-estate/homes-summer-residences/liepaja-and-district/liepaja/sell/rss/",
+    "daugavpils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/daugavpils-and-district/daugavpils/sell/rss/",
+    "ventspils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/ventspils-and-district/ventspils/sell/rss/",
 }
 
 def load_seen():
@@ -122,6 +140,31 @@ def format_area(area):
         return f"{int(area)} m²"
     return f"{area:.1f} m²"
 
+def fetch_feeds(districts, feeds_dict, seen, new_seen):
+    listings = {}
+    for district in districts:
+        feed_url = feeds_dict.get(district)
+        if not feed_url:
+            continue
+        logging.info(f"Checking feed: {feed_url}")
+        feed = feedparser.parse(feed_url)
+        district_listings = []
+        for entry in feed.entries:
+            item_id = entry.get("id") or entry.get("link") or entry.get("title")
+            link = entry.get("link", "")
+            if not item_id or item_id in seen:
+                continue
+            try:
+                details = fetch_listing_details(link)
+                details["item_id"] = item_id
+                district_listings.append(details)
+                new_seen.add(item_id)
+            except Exception as e:
+                logging.error(f"Failed to parse {link}: {e}")
+                new_seen.add(item_id)
+        listings[district] = district_listings
+    return listings
+
 def run():
     logging.info("Starting monitor run...")
 
@@ -135,33 +178,14 @@ def run():
     seen = load_seen()
     new_seen = set()
 
-    all_districts = set()
-    for user in users:
-        for d in user.get("districts", []):
-            all_districts.add(d)
+    apartment_users = [u for u in users if u.get("category", "apartment") == "apartment"]
+    house_users = [u for u in users if u.get("category") == "house"]
 
-    district_listings = {}
-    for district in all_districts:
-        feed_url = DISTRICT_FEEDS.get(district)
-        if not feed_url:
-            continue
-        logging.info(f"Checking feed: {feed_url}")
-        feed = feedparser.parse(feed_url)
-        listings = []
-        for entry in feed.entries:
-            item_id = entry.get("id") or entry.get("link") or entry.get("title")
-            link = entry.get("link", "")
-            if not item_id or item_id in seen:
-                continue
-            try:
-                details = fetch_listing_details(link)
-                details["item_id"] = item_id
-                listings.append(details)
-                new_seen.add(item_id)
-            except Exception as e:
-                logging.error(f"Failed to parse {link}: {e}")
-                new_seen.add(item_id)
-        district_listings[district] = listings
+    apartment_districts = set(d for u in apartment_users for d in u.get("districts", []))
+    house_districts = set(d for u in house_users for d in u.get("districts", []))
+
+    apartment_listings = fetch_feeds(apartment_districts, DISTRICT_FEEDS, seen, new_seen)
+    house_listings = fetch_feeds(house_districts, HOUSE_FEEDS, seen, new_seen)
 
     for user in users:
         chat_id = user["chat_id"]
@@ -169,10 +193,12 @@ def run():
         max_price = user["max_price"]
         min_rooms = user["min_rooms"]
         user_districts = user.get("districts", [])
+        category = user.get("category", "apartment")
+        listings_source = apartment_listings if category == "apartment" else house_listings
 
         matches = []
         for district in user_districts:
-            for listing in district_listings.get(district, []):
+            for listing in listings_source.get(district, []):
                 price = listing.get("price")
                 rooms = listing.get("rooms")
                 if price is None or rooms is None:
@@ -181,7 +207,8 @@ def run():
                     matches.append(listing)
 
         if matches:
-            message = "🏠 *Jauni SS.lv dzīvokļi pēc taviem kritērijiem*\n\n"
+            category_lv = "dzīvokļi" if category == "apartment" else "mājas"
+            message = f"🏠 *Jauni SS.lv {category_lv} pēc taviem kritērijiem*\n\n"
             for i, match in enumerate(matches, start=1):
                 message += (
                     f"{i}. {match['title']}\n"
