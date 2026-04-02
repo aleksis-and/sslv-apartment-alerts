@@ -15,52 +15,139 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-DISTRICT_FEEDS = {
+APARTMENT_BUY_FEEDS = {
     "riga": "https://www.ss.lv/lv/real-estate/flats/riga/all/sell/rss/",
     "centrs": "https://www.ss.lv/lv/real-estate/flats/riga/centre/sell/rss/",
     "agenskalns": "https://www.ss.lv/lv/real-estate/flats/riga/agenskalns/sell/rss/",
-    "purvciems": "https://www.ss.lv/lv/real-estate/flats/riga/purvciems/sell/rss/",
-    "teika": "https://www.ss.lv/lv/real-estate/flats/riga/teika/sell/rss/",
-    "plavnieki": "https://www.ss.lv/lv/real-estate/flats/riga/plavnieki/sell/rss/",
-    "imanta": "https://www.ss.lv/lv/real-estate/flats/riga/imanta/sell/rss/",
-    "jugla": "https://www.ss.lv/lv/real-estate/flats/riga/jugla/sell/rss/",
-    "mezciems": "https://www.ss.lv/lv/real-estate/flats/riga/mezciems/sell/rss/",
-    "kengarags": "https://www.ss.lv/lv/real-estate/flats/riga/kengarags/sell/rss/",
-    "zolitude": "https://www.ss.lv/lv/real-estate/flats/riga/zolitude/sell/rss/",
+    "aplokciems": "https://www.ss.lv/lv/real-estate/flats/riga/aplokciems/sell/rss/",
+    "bergi": "https://www.ss.lv/lv/real-estate/flats/riga/bergi/sell/rss/",
+    "bierini": "https://www.ss.lv/lv/real-estate/flats/riga/bierini/sell/rss/",
     "bolderaja": "https://www.ss.lv/lv/real-estate/flats/riga/bolderaja/sell/rss/",
+    "breksi": "https://www.ss.lv/lv/real-estate/flats/riga/breksi/sell/rss/",
+    "ciekurkalns": "https://www.ss.lv/lv/real-estate/flats/riga/ciekurkalns/sell/rss/",
+    "darzciems": "https://www.ss.lv/lv/real-estate/flats/riga/darzciems/sell/rss/",
+    "daugavgriva": "https://www.ss.lv/lv/real-estate/flats/riga/daugavgriva/sell/rss/",
+    "dreilini": "https://www.ss.lv/lv/real-estate/flats/riga/dreilini/sell/rss/",
+    "dzeguzkalns": "https://www.ss.lv/lv/real-estate/flats/riga/dzeguzkalns/sell/rss/",
+    "grizinkalns": "https://www.ss.lv/lv/real-estate/flats/riga/grizinkalns/sell/rss/",
     "ilguciems": "https://www.ss.lv/lv/real-estate/flats/riga/ilguciems/sell/rss/",
+    "imanta": "https://www.ss.lv/lv/real-estate/flats/riga/imanta/sell/rss/",
+    "jaunciems": "https://www.ss.lv/lv/real-estate/flats/riga/jaunciems/sell/rss/",
+    "jugla": "https://www.ss.lv/lv/real-estate/flats/riga/jugla/sell/rss/",
+    "kengarags": "https://www.ss.lv/lv/real-estate/flats/riga/kengarags/sell/rss/",
+    "kipsala": "https://www.ss.lv/lv/real-estate/flats/riga/kipsala/sell/rss/",
+    "kliversala": "https://www.ss.lv/lv/real-estate/flats/riga/kliversala/sell/rss/",
+    "krasta-r-ns": "https://www.ss.lv/lv/real-estate/flats/riga/krasta-r-ns/sell/rss/",
+    "latgales-priekspilseta": "https://www.ss.lv/lv/real-estate/flats/riga/latgales-priekspilseta/sell/rss/",
+    "mangali": "https://www.ss.lv/lv/real-estate/flats/riga/mangali/sell/rss/",
+    "mezaparks": "https://www.ss.lv/lv/real-estate/flats/riga/mezaparks/sell/rss/",
+    "mezciems": "https://www.ss.lv/lv/real-estate/flats/riga/mezciems/sell/rss/",
+    "plavnieki": "https://www.ss.lv/lv/real-estate/flats/riga/plavnieki/sell/rss/",
+    "purvciems": "https://www.ss.lv/lv/real-estate/flats/riga/purvciems/sell/rss/",
+    "sarkandaugava": "https://www.ss.lv/lv/real-estate/flats/riga/sarkandaugava/sell/rss/",
+    "sampeteris": "https://www.ss.lv/lv/real-estate/flats/riga/sampeteris-pleskodāle/sell/rss/",
+    "teika": "https://www.ss.lv/lv/real-estate/flats/riga/teika/sell/rss/",
+    "tornakalns": "https://www.ss.lv/lv/real-estate/flats/riga/tornakalns/sell/rss/",
+    "vecaki": "https://www.ss.lv/lv/real-estate/flats/riga/vecaki/sell/rss/",
+    "vecmilgravis": "https://www.ss.lv/lv/real-estate/flats/riga/vecmilgravis/sell/rss/",
+    "vecriga": "https://www.ss.lv/lv/real-estate/flats/riga/vecriga/sell/rss/",
+    "ziepniekkalns": "https://www.ss.lv/lv/real-estate/flats/riga/ziepniekkalns/sell/rss/",
+    "zolitude": "https://www.ss.lv/lv/real-estate/flats/riga/zolitude/sell/rss/",
     "pardaugava": "https://www.ss.lv/lv/real-estate/flats/riga/pardaugava/sell/rss/",
+    "zasulauks": "https://www.ss.lv/lv/real-estate/flats/riga/zasulauks/sell/rss/",
+    "vef": "https://www.ss.lv/lv/real-estate/flats/riga/vef/sell/rss/",
+    "jurmala": "https://www.ss.lv/lv/real-estate/flats/jurmala/all/sell/rss/",
+    "riga-region": "https://www.ss.lv/lv/real-estate/flats/riga-region/all/sell/rss/",
     "adazu-nov": "https://www.ss.lv/lv/real-estate/flats/riga-region/adazu-nov/sell/rss/",
     "sigulda": "https://www.ss.lv/lv/real-estate/flats/riga-region/sigulda/sell/rss/",
     "salaspils": "https://www.ss.lv/lv/real-estate/flats/riga-region/salaspils/sell/rss/",
     "marupe": "https://www.ss.lv/lv/real-estate/flats/riga-region/marupe/sell/rss/",
     "olaine": "https://www.ss.lv/lv/real-estate/flats/riga-region/olaine/sell/rss/",
     "stopini": "https://www.ss.lv/lv/real-estate/flats/riga-region/stopini/sell/rss/",
-    "jurmala": "https://www.ss.lv/lv/real-estate/flats/jurmala/all/sell/rss/",
-    "jelgava": "https://www.ss.lv/lv/real-estate/flats/jelgava-and-district/jelgava/sell/rss/",
-    "liepaja": "https://www.ss.lv/lv/real-estate/flats/liepaja-and-district/liepaja/sell/rss/",
-    "daugavpils": "https://www.ss.lv/lv/real-estate/flats/daugavpils-and-district/daugavpils/sell/rss/",
-    "ventspils": "https://www.ss.lv/lv/real-estate/flats/ventspils-and-district/ventspils/sell/rss/",
+    "aizkraukle-and-reg": "https://www.ss.lv/lv/real-estate/flats/aizkraukle-and-reg/sell/rss/",
+    "aluksne-and-reg": "https://www.ss.lv/lv/real-estate/flats/aluksne-and-reg/sell/rss/",
+    "balvi-and-reg": "https://www.ss.lv/lv/real-estate/flats/balvi-and-reg/sell/rss/",
+    "bauska-and-reg": "https://www.ss.lv/lv/real-estate/flats/bauska-and-reg/sell/rss/",
+    "cesis-and-reg": "https://www.ss.lv/lv/real-estate/flats/cesis-and-reg/sell/rss/",
+    "daugavpils-and-reg": "https://www.ss.lv/lv/real-estate/flats/daugavpils-and-reg/sell/rss/",
+    "dobele-and-reg": "https://www.ss.lv/lv/real-estate/flats/dobele-and-reg/sell/rss/",
+    "gulbene-and-reg": "https://www.ss.lv/lv/real-estate/flats/gulbene-and-reg/sell/rss/",
+    "jekabpils-and-reg": "https://www.ss.lv/lv/real-estate/flats/jekabpils-and-reg/sell/rss/",
+    "jelgava-and-reg": "https://www.ss.lv/lv/real-estate/flats/jelgava-and-reg/sell/rss/",
+    "kraslava-and-reg": "https://www.ss.lv/lv/real-estate/flats/kraslava-and-reg/sell/rss/",
+    "kuldiga-and-reg": "https://www.ss.lv/lv/real-estate/flats/kuldiga-and-reg/sell/rss/",
+    "liepaja-and-reg": "https://www.ss.lv/lv/real-estate/flats/liepaja-and-reg/sell/rss/",
+    "limbadzi-and-reg": "https://www.ss.lv/lv/real-estate/flats/limbadzi-and-reg/sell/rss/",
+    "ludza-and-reg": "https://www.ss.lv/lv/real-estate/flats/ludza-and-reg/sell/rss/",
+    "madona-and-reg": "https://www.ss.lv/lv/real-estate/flats/madona-and-reg/sell/rss/",
+    "ogre-and-reg": "https://www.ss.lv/lv/real-estate/flats/ogre-and-reg/sell/rss/",
+    "preili-and-reg": "https://www.ss.lv/lv/real-estate/flats/preili-and-reg/sell/rss/",
+    "rezekne-and-reg": "https://www.ss.lv/lv/real-estate/flats/rezekne-and-reg/sell/rss/",
+    "saldus-and-reg": "https://www.ss.lv/lv/real-estate/flats/saldus-and-reg/sell/rss/",
+    "talsi-and-reg": "https://www.ss.lv/lv/real-estate/flats/talsi-and-reg/sell/rss/",
+    "tukums-and-reg": "https://www.ss.lv/lv/real-estate/flats/tukums-and-reg/sell/rss/",
+    "valka-and-reg": "https://www.ss.lv/lv/real-estate/flats/valka-and-reg/sell/rss/",
+    "valmiera-and-reg": "https://www.ss.lv/lv/real-estate/flats/valmiera-and-reg/sell/rss/",
+    "ventspils-and-reg": "https://www.ss.lv/lv/real-estate/flats/ventspils-and-reg/sell/rss/",
 }
 
-HOUSE_FEEDS = {
+APARTMENT_RENT_FEEDS = {k: v.replace("/sell/", "/hand_over/") for k, v in APARTMENT_BUY_FEEDS.items()}
+
+HOUSE_BUY_FEEDS = {
     "riga": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/sell/rss/",
     "centrs": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/centre/sell/rss/",
     "agenskalns": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/agenskalns/sell/rss/",
-    "purvciems": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/purvciems/sell/rss/",
+    "bolderaja": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/bolderaja/sell/rss/",
+    "daugavgriva": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/daugavgriva/sell/rss/",
+    "ilguciems": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/ilguciems/sell/rss/",
     "imanta": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/imanta/sell/rss/",
     "jugla": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/jugla/sell/rss/",
+    "kengarags": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/kengarags/sell/rss/",
+    "mezaparks": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/mezaparks/sell/rss/",
+    "mezciems": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/mezciems/sell/rss/",
+    "purvciems": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/purvciems/sell/rss/",
+    "sarkandaugava": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/sarkandaugava/sell/rss/",
+    "teika": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/teika/sell/rss/",
+    "tornakalns": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/tornakalns/sell/rss/",
+    "vecaki": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/vecaki/sell/rss/",
+    "vecmilgravis": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/vecmilgravis/sell/rss/",
+    "ziepniekkalns": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/ziepniekkalns/sell/rss/",
+    "zolitude": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga/zolitude/sell/rss/",
+    "jurmala": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jurmala/all/sell/rss/",
+    "riga-region": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/sell/rss/",
     "adazu-nov": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/adazu-nov/sell/rss/",
     "sigulda": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/sigulda/sell/rss/",
     "salaspils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/salaspils/sell/rss/",
     "marupe": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/marupe/sell/rss/",
     "olaine": "https://www.ss.lv/lv/real-estate/homes-summer-residences/riga-region/olaine/sell/rss/",
-    "jurmala": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jurmala/all/sell/rss/",
-    "jelgava": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jelgava-and-district/jelgava/sell/rss/",
-    "liepaja": "https://www.ss.lv/lv/real-estate/homes-summer-residences/liepaja-and-district/liepaja/sell/rss/",
-    "daugavpils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/daugavpils-and-district/daugavpils/sell/rss/",
-    "ventspils": "https://www.ss.lv/lv/real-estate/homes-summer-residences/ventspils-and-district/ventspils/sell/rss/",
+    "aizkraukle-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/aizkraukle-and-district/sell/rss/",
+    "aluksne-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/aluksne-and-district/sell/rss/",
+    "balvi-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/balvi-and-district/sell/rss/",
+    "bauska-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/bauska-and-district/sell/rss/",
+    "cesis-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/cesis-and-district/sell/rss/",
+    "daugavpils-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/daugavpils-and-district/sell/rss/",
+    "dobele-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/dobele-and-district/sell/rss/",
+    "gulbene-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/gulbene-and-district/sell/rss/",
+    "jekabpils-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jekabpils-and-district/sell/rss/",
+    "jelgava-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/jelgava-and-district/sell/rss/",
+    "kraslava-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/kraslava-and-district/sell/rss/",
+    "kuldiga-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/kuldiga-and-district/sell/rss/",
+    "liepaja-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/liepaja-and-district/sell/rss/",
+    "limbadzi-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/limbazi-and-district/sell/rss/",
+    "ludza-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/ludza-and-district/sell/rss/",
+    "madona-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/madona-and-district/sell/rss/",
+    "ogre-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/ogre-and-district/sell/rss/",
+    "preili-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/preili-and-district/sell/rss/",
+    "rezekne-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/rezekne-and-district/sell/rss/",
+    "saldus-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/saldus-and-district/sell/rss/",
+    "talsi-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/talsi-and-district/sell/rss/",
+    "tukums-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/tukums-and-district/sell/rss/",
+    "valka-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/valka-and-district/sell/rss/",
+    "valmiera-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/valmiera-and-district/sell/rss/",
+    "ventspils-and-reg": "https://www.ss.lv/lv/real-estate/homes-summer-residences/ventspils-and-district/sell/rss/",
 }
+
+HOUSE_RENT_FEEDS = {k: v.replace("/sell/", "/hand_over/") for k, v in HOUSE_BUY_FEEDS.items()}
 
 def load_seen():
     result = supabase.table("seen_listings").select("id").execute()
@@ -104,20 +191,16 @@ def fetch_listing_details(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
-
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
-
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;|&#160;", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-
     rooms_raw = extract_field(text, "rooms")
     area_raw = extract_field(text, "area")
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
-
     return {
         "title": title,
         "rooms": int(rooms_raw) if rooms_raw and rooms_raw.isdigit() else None,
@@ -145,6 +228,7 @@ def fetch_feeds(districts, feeds_dict, seen, new_seen):
     for district in districts:
         feed_url = feeds_dict.get(district)
         if not feed_url:
+            logging.info(f"No feed for district: {district} — skipping")
             continue
         logging.info(f"Checking feed: {feed_url}")
         feed = feedparser.parse(feed_url)
@@ -165,28 +249,40 @@ def fetch_feeds(districts, feeds_dict, seen, new_seen):
         listings[district] = district_listings
     return listings
 
+def get_feeds(category, intent):
+    if category == 'house':
+        return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
+    return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
+
 def run():
     logging.info("Starting monitor run...")
-
     result = supabase.table("users").select("*").eq("active", True).execute()
     users = result.data
     logging.info(f"Found {len(users)} active users")
-
     if not users:
         return
 
     seen = load_seen()
     new_seen = set()
 
-    apartment_users = [u for u in users if u.get("category", "apartment") == "apartment"]
-    house_users = [u for u in users if u.get("category") == "house"]
+    # Group users by category+intent combination
+    groups = {}
+    for user in users:
+        category = user.get("category", "apartment")
+        intent = user.get("intent", "buy")
+        key = f"{category}_{intent}"
+        if key not in groups:
+            groups[key] = {"users": [], "districts": set(), "feeds": get_feeds(category, intent)}
+        groups[key]["users"].append(user)
+        for d in user.get("districts", []):
+            groups[key]["districts"].add(d)
 
-    apartment_districts = set(d for u in apartment_users for d in u.get("districts", []))
-    house_districts = set(d for u in house_users for d in u.get("districts", []))
+    # Fetch listings per group
+    group_listings = {}
+    for key, group in groups.items():
+        group_listings[key] = fetch_feeds(group["districts"], group["feeds"], seen, new_seen)
 
-    apartment_listings = fetch_feeds(apartment_districts, DISTRICT_FEEDS, seen, new_seen)
-    house_listings = fetch_feeds(house_districts, HOUSE_FEEDS, seen, new_seen)
-
+    # Send alerts
     for user in users:
         chat_id = user["chat_id"]
         min_price = user["min_price"]
@@ -194,7 +290,9 @@ def run():
         min_rooms = user["min_rooms"]
         user_districts = user.get("districts", [])
         category = user.get("category", "apartment")
-        listings_source = apartment_listings if category == "apartment" else house_listings
+        intent = user.get("intent", "buy")
+        key = f"{category}_{intent}"
+        listings_source = group_listings.get(key, {})
 
         matches = []
         for district in user_districts:
@@ -208,7 +306,8 @@ def run():
 
         if matches:
             category_lv = "dzīvokļi" if category == "apartment" else "mājas"
-            message = f"🏠 *Jauni SS.lv {category_lv} pēc taviem kritērijiem*\n\n"
+            intent_lv = "pārdošanā" if intent == "buy" else "īrei"
+            message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n\n"
             for i, match in enumerate(matches, start=1):
                 message += (
                     f"{i}. {match['title']}\n"
