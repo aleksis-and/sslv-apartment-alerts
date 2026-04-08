@@ -2,3 +2,4 @@ feedparser
 requests
 supabase
 apscheduler
+flask
