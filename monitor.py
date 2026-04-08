@@ -389,19 +389,15 @@ def process_user(user):
             area = listing.get("area")
 
             if price is None or rooms is None:
-                logging.info(f"Skipping {item_id} — price={price} rooms={rooms}")
                 new_seen.add(item_id)
                 continue
             if user_rooms and rooms not in user_rooms:
-                logging.info(f"Skipping {item_id} — rooms {rooms} not in {user_rooms}")
                 new_seen.add(item_id)
                 continue
             if not (min_price <= price <= max_price):
-                logging.info(f"Skipping {item_id} — price {price} not in {min_price}-{max_price}")
                 new_seen.add(item_id)
                 continue
             if area is not None and not (min_area <= area <= max_area):
-                logging.info(f"Skipping {item_id} — area {area} not in {min_area}-{max_area}")
                 new_seen.add(item_id)
                 continue
             matches.append(listing)
