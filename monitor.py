@@ -255,7 +255,11 @@ def extract_field(text, label):
     patterns = {
         "rooms": [r"Istabas:\s*(\d+)"],
         "area": [r"Platība:\s*(\d+(?:[.,]\d+)?)\s*m[²2]"],
-        "price": [r"Cena:\s*([\d\s.,]+)\s*€"],
+        "price": [
+            r"Cena:\s*([\d\s.,]+)\s*€",
+            r"cena\s+([\d\s]+)\s*€",
+            r"(\d[\d\s]*)\s*€",
+        ],
         "floor": [r"Stāvs:\s*([^\s]+)"],
         "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)"],
     }
@@ -270,19 +274,46 @@ def fetch_listing_details(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
+
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
+
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;|&#160;", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
+
     rooms_raw = extract_field(text, "rooms")
     area_raw = extract_field(text, "area")
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
+
+    # Fallback: extract rooms from title e.g. "četristabu" or "4-istabu"
+    if not rooms_raw:
+        word_to_num = {
+            "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
+            "četristabu": "4", "piecīstabu": "5", "sešistabu": "6",
+            "1-istabu": "1", "2-istabu": "2", "3-istabu": "3",
+            "4-istabu": "4", "5-istabu": "5", "6-istabu": "6",
+        }
+        for word, num in word_to_num.items():
+            if word in title.lower():
+                rooms_raw = num
+                break
+        if not rooms_raw:
+            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', title, re.IGNORECASE)
+            if title_rooms:
+                rooms_raw = title_rooms.group(1)
+
+    # Fallback: extract price from title e.g. "38 100 €"
+    if not price_raw:
+        title_price = re.search(r'(\d[\d\s]*)\s*€', title)
+        if title_price:
+            price_raw = title_price.group(1)
+
     return {
         "title": title,
-        "rooms": int(rooms_raw) if rooms_raw and rooms_raw.isdigit() else None,
+        "rooms": int(rooms_raw) if rooms_raw and str(rooms_raw).strip().isdigit() else None,
         "area": float(area_raw.replace(",", ".")) if area_raw else None,
         "price": normalize_int(price_raw),
         "floor": floor_raw,
