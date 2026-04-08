@@ -288,7 +288,7 @@ def fetch_listing_details(url):
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
 
-    # Fallback: extract rooms from title e.g. "četristabu" or "4-istabu"
+    # Fallback: extract rooms from title
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
@@ -305,7 +305,7 @@ def fetch_listing_details(url):
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
 
-    # Fallback: extract price from title e.g. "38 100 €"
+    # Fallback: extract price from title
     if not price_raw:
         title_price = re.search(r'(\d[\d\s]*)\s*€', title)
         if title_price:
@@ -387,16 +387,21 @@ def process_user(user):
             price = listing.get("price")
             rooms = listing.get("rooms")
             area = listing.get("area")
+
             if price is None or rooms is None:
+                logging.info(f"Skipping {item_id} — price={price} rooms={rooms}")
                 new_seen.add(item_id)
                 continue
             if user_rooms and rooms not in user_rooms:
+                logging.info(f"Skipping {item_id} — rooms {rooms} not in {user_rooms}")
                 new_seen.add(item_id)
                 continue
             if not (min_price <= price <= max_price):
+                logging.info(f"Skipping {item_id} — price {price} not in {min_price}-{max_price}")
                 new_seen.add(item_id)
                 continue
             if area is not None and not (min_area <= area <= max_area):
+                logging.info(f"Skipping {item_id} — area {area} not in {min_area}-{max_area}")
                 new_seen.add(item_id)
                 continue
             matches.append(listing)
