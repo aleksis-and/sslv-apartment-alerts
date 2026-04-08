@@ -224,14 +224,14 @@ DISTRICT_NAMES = {
     "ventspils-and-reg": "Ventspils un rajons",
 }
 
-def load_seen():
-    result = supabase.table("seen_listings").select("id").execute()
+def load_seen_for_user(chat_id):
+    result = supabase.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
     return set(row["id"] for row in result.data)
 
-def save_seen(new_ids):
+def save_seen_for_user(chat_id, new_ids):
     if not new_ids:
         return
-    rows = [{"id": id} for id in new_ids]
+    rows = [{"id": id, "chat_id": chat_id} for id in new_ids]
     supabase.table("seen_listings").upsert(rows).execute()
 
 def send_telegram_message(chat_id, text):
@@ -298,7 +298,7 @@ def format_area(area):
         return f"{int(area)} m²"
     return f"{area:.1f} m²"
 
-def fetch_feeds(districts, feeds_dict, seen, new_seen):
+def fetch_feeds(districts, feeds_dict):
     listings = {}
     for district in districts:
         feed_url = feeds_dict.get(district)
@@ -311,16 +311,14 @@ def fetch_feeds(districts, feeds_dict, seen, new_seen):
         for entry in feed.entries:
             item_id = entry.get("id") or entry.get("link") or entry.get("title")
             link = entry.get("link", "")
-            if not item_id or item_id in seen:
+            if not item_id:
                 continue
             try:
                 details = fetch_listing_details(link)
                 details["item_id"] = item_id
                 district_listings.append(details)
-                new_seen.add(item_id)
             except Exception as e:
                 logging.error(f"Failed to parse {link}: {e}")
-                new_seen.add(item_id)
         listings[district] = district_listings
     return listings
 
@@ -337,24 +335,23 @@ def run():
     if not users:
         return
 
-    seen = load_seen()
-    new_seen = set()
-
+    # Group users by category+intent to avoid fetching same feeds multiple times
     groups = {}
     for user in users:
         category = user.get("category", "apartment")
         intent = user.get("intent", "buy")
         key = f"{category}_{intent}"
         if key not in groups:
-            groups[key] = {"users": [], "districts": set(), "feeds": get_feeds(category, intent)}
-        groups[key]["users"].append(user)
+            groups[key] = {"districts": set(), "feeds": get_feeds(category, intent)}
         for d in user.get("districts", []):
             groups[key]["districts"].add(d)
 
+    # Fetch all listings per group
     group_listings = {}
     for key, group in groups.items():
-        group_listings[key] = fetch_feeds(group["districts"], group["feeds"], seen, new_seen)
+        group_listings[key] = fetch_feeds(group["districts"], group["feeds"])
 
+    # Process each user individually with their own seen list
     for user in users:
         chat_id = user["chat_id"]
         min_price = user.get("min_price", 0)
@@ -368,21 +365,33 @@ def run():
         key = f"{category}_{intent}"
         listings_source = group_listings.get(key, {})
 
+        # Load this user's seen listings
+        seen = load_seen_for_user(chat_id)
+        new_seen = set()
+
         matches = []
         for district in user_districts:
             for listing in listings_source.get(district, []):
+                item_id = listing.get("item_id")
+                if item_id in seen:
+                    continue
                 price = listing.get("price")
                 rooms = listing.get("rooms")
                 area = listing.get("area")
                 if price is None or rooms is None:
+                    new_seen.add(item_id)
                     continue
                 if user_rooms and rooms not in user_rooms:
+                    new_seen.add(item_id)
                     continue
                 if not (min_price <= price <= max_price):
+                    new_seen.add(item_id)
                     continue
                 if area is not None and not (min_area <= area <= max_area):
+                    new_seen.add(item_id)
                     continue
                 matches.append(listing)
+                new_seen.add(item_id)
 
         if matches:
             category_lv = "dzīvokļi" if category == "apartment" else "mājas"
@@ -406,7 +415,9 @@ def run():
         else:
             logging.info(f"No matches for {chat_id}")
 
-    save_seen(new_seen)
+        # Save seen listings for this user
+        save_seen_for_user(chat_id, new_seen)
+
     logging.info("Run complete.")
 
 if __name__ == "__main__":
