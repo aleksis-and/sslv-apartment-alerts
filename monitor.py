@@ -1,6 +1,8 @@
 import re
 import os
 import logging
+import threading
+from flask import Flask, request, jsonify
 from supabase import create_client
 from apscheduler.schedulers.blocking import BlockingScheduler
 import feedparser
@@ -13,6 +15,8 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+flask_app = Flask(__name__)
 
 APARTMENT_BUY_FEEDS = {
     "riga": "https://www.ss.lv/lv/real-estate/flats/riga/all/sell/rss/",
@@ -327,6 +331,70 @@ def get_feeds(category, intent):
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
 
+def process_user(user):
+    chat_id = user["chat_id"]
+    min_price = user.get("min_price", 0)
+    max_price = user.get("max_price", 9999999)
+    min_area = user.get("min_area", 0)
+    max_area = user.get("max_area", 9999)
+    user_rooms = user.get("rooms") or []
+    user_districts = user.get("districts", [])
+    category = user.get("category", "apartment")
+    intent = user.get("intent", "buy")
+
+    feeds = get_feeds(category, intent)
+    listings_source = fetch_feeds(set(user_districts), feeds)
+    seen = load_seen_for_user(chat_id)
+    new_seen = set()
+    matches = []
+
+    for district in user_districts:
+        for listing in listings_source.get(district, []):
+            item_id = listing.get("item_id")
+            if item_id in seen:
+                continue
+            price = listing.get("price")
+            rooms = listing.get("rooms")
+            area = listing.get("area")
+            if price is None or rooms is None:
+                new_seen.add(item_id)
+                continue
+            if user_rooms and rooms not in user_rooms:
+                new_seen.add(item_id)
+                continue
+            if not (min_price <= price <= max_price):
+                new_seen.add(item_id)
+                continue
+            if area is not None and not (min_area <= area <= max_area):
+                new_seen.add(item_id)
+                continue
+            matches.append(listing)
+            new_seen.add(item_id)
+
+    if matches:
+        category_lv = "dzīvokļi" if category == "apartment" else "mājas"
+        intent_lv = "pārdošanā" if intent == "buy" else "īrei"
+        district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
+        message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n"
+        message += f"📍 {district_names}\n\n"
+        for i, match in enumerate(matches, start=1):
+            rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+            message += (
+                f"{i}. {match['title']}\n"
+                f"• Istabas: {rooms_str}\n"
+                f"• Cena: {format_price(match['price'])}\n"
+                f"• Platība: {format_area(match['area'])}\n"
+                f"• Stāvs: {match['floor'] or 'Nav'}\n"
+                f"• Adrese: {match['street'] or 'Nav'}\n"
+                f"• Saite: {match['url']}\n\n"
+            )
+        send_telegram_message(chat_id, message.strip())
+        logging.info(f"Sent {len(matches)} matches to {chat_id}")
+    else:
+        logging.info(f"No matches for {chat_id}")
+
+    save_seen_for_user(chat_id, new_seen)
+
 def run():
     logging.info("Starting monitor run...")
     result = supabase.table("users").select("*").eq("active", True).execute()
@@ -334,94 +402,37 @@ def run():
     logging.info(f"Found {len(users)} active users")
     if not users:
         return
-
-    # Group users by category+intent to avoid fetching same feeds multiple times
-    groups = {}
     for user in users:
-        category = user.get("category", "apartment")
-        intent = user.get("intent", "buy")
-        key = f"{category}_{intent}"
-        if key not in groups:
-            groups[key] = {"districts": set(), "feeds": get_feeds(category, intent)}
-        for d in user.get("districts", []):
-            groups[key]["districts"].add(d)
-
-    # Fetch all listings per group
-    group_listings = {}
-    for key, group in groups.items():
-        group_listings[key] = fetch_feeds(group["districts"], group["feeds"])
-
-    # Process each user individually with their own seen list
-    for user in users:
-        chat_id = user["chat_id"]
-        min_price = user.get("min_price", 0)
-        max_price = user.get("max_price", 9999999)
-        min_area = user.get("min_area", 0)
-        max_area = user.get("max_area", 9999)
-        user_rooms = user.get("rooms") or []
-        user_districts = user.get("districts", [])
-        category = user.get("category", "apartment")
-        intent = user.get("intent", "buy")
-        key = f"{category}_{intent}"
-        listings_source = group_listings.get(key, {})
-
-        # Load this user's seen listings
-        seen = load_seen_for_user(chat_id)
-        new_seen = set()
-
-        matches = []
-        for district in user_districts:
-            for listing in listings_source.get(district, []):
-                item_id = listing.get("item_id")
-                if item_id in seen:
-                    continue
-                price = listing.get("price")
-                rooms = listing.get("rooms")
-                area = listing.get("area")
-                if price is None or rooms is None:
-                    new_seen.add(item_id)
-                    continue
-                if user_rooms and rooms not in user_rooms:
-                    new_seen.add(item_id)
-                    continue
-                if not (min_price <= price <= max_price):
-                    new_seen.add(item_id)
-                    continue
-                if area is not None and not (min_area <= area <= max_area):
-                    new_seen.add(item_id)
-                    continue
-                matches.append(listing)
-                new_seen.add(item_id)
-
-        if matches:
-            category_lv = "dzīvokļi" if category == "apartment" else "mājas"
-            intent_lv = "pārdošanā" if intent == "buy" else "īrei"
-            district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
-            message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n"
-            message += f"📍 {district_names}\n\n"
-            for i, match in enumerate(matches, start=1):
-                rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
-                message += (
-                    f"{i}. {match['title']}\n"
-                    f"• Istabas: {rooms_str}\n"
-                    f"• Cena: {format_price(match['price'])}\n"
-                    f"• Platība: {format_area(match['area'])}\n"
-                    f"• Stāvs: {match['floor'] or 'Nav'}\n"
-                    f"• Adrese: {match['street'] or 'Nav'}\n"
-                    f"• Saite: {match['url']}\n\n"
-                )
-            send_telegram_message(chat_id, message.strip())
-            logging.info(f"Sent {len(matches)} matches to {chat_id}")
-        else:
-            logging.info(f"No matches for {chat_id}")
-
-        # Save seen listings for this user
-        save_seen_for_user(chat_id, new_seen)
-
+        process_user(user)
     logging.info("Run complete.")
+
+@flask_app.route("/run-for-user", methods=["POST"])
+def run_for_user():
+    data = request.get_json()
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        return jsonify({"error": "chat_id required"}), 400
+    result = supabase.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+    if not result.data:
+        return jsonify({"error": "user not found"}), 404
+    user = result.data[0]
+    threading.Thread(target=process_user, args=(user,)).start()
+    logging.info(f"Triggered run for user {chat_id}")
+    return jsonify({"success": True})
+
+@flask_app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     scheduler = BlockingScheduler()
     scheduler.add_job(run, 'interval', minutes=30, next_run_time=__import__('datetime').datetime.now())
     logging.info("Scheduler started — running every 30 minutes.")
+
+    flask_thread = threading.Thread(
+        target=lambda: flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    )
+    flask_thread.daemon = True
+    flask_thread.start()
+
     scheduler.start()
