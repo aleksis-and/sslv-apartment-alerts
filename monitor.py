@@ -332,7 +332,12 @@ def save_seen_for_user(chat_id, new_ids):
 
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=30)
+    requests.post(url, json={
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }, timeout=30)
 
 def normalize_int(value):
     if value is None:
@@ -376,6 +381,9 @@ def fetch_listing_details(url):
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
+    # Clean up "Karte" suffix from SS.lv addresses
+    if street_raw:
+        street_raw = re.sub(r'\s+Karte\s*$', '', street_raw).strip()
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
@@ -485,12 +493,21 @@ def fetch_city24_listings(districts, category, intent):
                 area = item.get("property_size")
                 addr = item.get("address", {})
                 street_name_raw = addr.get("street_name", "")
+                house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
+                apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
                 city_name_raw = addr.get("city_name", "")
                 county_name_raw = addr.get("county_name") or city_name_raw
                 attrs = item.get("attributes", {})
                 floor = attrs.get("FLOOR")
                 total_floors = attrs.get("TOTAL_FLOORS")
                 floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
+
+                # Build full address
+                full_address = street_name_raw
+                if house_number:
+                    full_address += f" {house_number}"
+                if apartment_number:
+                    full_address += f"-{apartment_number}"
 
                 # Build address slug for URL
                 county_slug = slugify(county_name_raw)
@@ -507,12 +524,12 @@ def fetch_city24_listings(districts, category, intent):
 
                 district_listings.append({
                     "item_id": item_id,
-                    "title": f"City24.lv — {street_name_raw}, {city_name_raw}",
+                    "title": f"City24.lv — {full_address}, {city_name_raw}",
                     "rooms": rooms,
                     "area": float(area) if area else None,
                     "price": int(float(price_raw)) if price_raw else None,
                     "floor": floor_str,
-                    "street": street_name_raw,
+                    "street": full_address,
                     "url": listing_url,
                     "source": "City24.lv",
                 })
