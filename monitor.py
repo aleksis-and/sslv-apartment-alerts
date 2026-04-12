@@ -72,32 +72,32 @@ CITY24_DISTRICT_MAP = {
     "adazu-nov":                {"city": 245423, "district": None},
     "stopini":                  {"city": 245689, "district": None},
     # Regional cities — no city24 presence, skip
-    "riga-region":              None,
-    "aizkraukle-and-reg":       None,
-    "aluksne-and-reg":          None,
-    "balvi-and-reg":            None,
-    "bauska-and-reg":           None,
-    "cesis-and-reg":            None,
-    "daugavpils-and-reg":       None,
-    "dobele-and-reg":           None,
-    "gulbene-and-reg":          None,
-    "jekabpils-and-reg":        None,
-    "jelgava-and-reg":          None,
-    "kraslava-and-reg":         None,
-    "kuldiga-and-reg":          None,
-    "liepaja-and-reg":          None,
-    "limbadzi-and-reg":         None,
-    "ludza-and-reg":            None,
-    "madona-and-reg":           None,
-    "ogre-and-reg":             None,
-    "preili-and-reg":           None,
-    "rezekne-and-reg":          None,
-    "saldus-and-reg":           None,
-    "talsi-and-reg":            None,
-    "tukums-and-reg":           None,
-    "valka-and-reg":            None,
-    "valmiera-and-reg":         None,
-    "ventspils-and-reg":        None,
+    "riga-region":          {"city": 245330, "district": None},  # Ropažu nov. as proxy
+    "aizkraukle-and-reg":   {"city": 245346, "district": None},
+    "aluksne-and-reg":      {"city": 245350, "district": None},
+    "balvi-and-reg":        None,  # No Balvi in list
+    "bauska-and-reg":       {"city": 245356, "district": None},
+    "cesis-and-reg":        {"city": 245359, "district": None},
+    "daugavpils-and-reg":   {"city": 245361, "district": None},
+    "dobele-and-reg":       {"city": 245362, "district": None},
+    "gulbene-and-reg":      {"city": 245365, "district": None},
+    "jekabpils-and-reg":    {"city": 245371, "district": None},
+    "jelgava-and-reg":      {"city": 245370, "district": None},
+    "kraslava-and-reg":     {"city": 245375, "district": None},
+    "kuldiga-and-reg":      {"city": 245376, "district": None},
+    "liepaja-and-reg":      {"city": 245379, "district": None},
+    "limbadzi-and-reg":     None,  # No Limbaži in list
+    "ludza-and-reg":        {"city": 245382, "district": None},
+    "madona-and-reg":       {"city": 245385, "district": None},
+    "ogre-and-reg":         {"city": 245388, "district": None},
+    "preili-and-reg":       None,  # No Preiļi in list
+    "rezekne-and-reg":      {"city": 245395, "district": None},
+    "saldus-and-reg":       None,  # No Saldus in list
+    "talsi-and-reg":        {"city": 245411, "district": None},
+    "tukums-and-reg":       {"city": 245412, "district": None},
+    "valka-and-reg":        None,  # No Valka in list
+    "valmiera-and-reg":     {"city": 245415, "district": None},
+    "ventspils-and-reg":    {"city": 245418, "district": None},
 }
 
 APARTMENT_BUY_FEEDS = {
