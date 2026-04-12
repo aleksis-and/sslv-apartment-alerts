@@ -359,6 +359,7 @@ def extract_field(text, label):
         ],
         "floor": [r"Stāvs:\s*([^\s]+)"],
         "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)"],
+        "city": [r"Vieta:\s*([^\|•\n]+)"],
     }
     for pattern in patterns.get(label, []):
         match = re.search(pattern, text, re.IGNORECASE)
@@ -381,8 +382,11 @@ def fetch_listing_details(url):
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
+    city_raw = extract_field(text, "city")
     if street_raw:
         street_raw = re.sub(r'\s*\[?\s*Karte\s*\]?\s*$', '', street_raw).strip()
+    if city_raw:
+        city_raw = city_raw.strip().rstrip('|').strip()
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
@@ -409,7 +413,7 @@ def fetch_listing_details(url):
         "price": normalize_int(price_raw),
         "floor": floor_raw,
         "street": street_raw,
-        "city_name": "",
+        "city_name": city_raw or "",
         "url": url,
     }
 
@@ -424,6 +428,12 @@ def format_area(area):
     if float(area).is_integer():
         return f"{int(area)} m²"
     return f"{area:.1f} m²"
+
+def format_price_per_sqm(price, area):
+    if price is None or area is None or area == 0:
+        return "Nav"
+    ppm = round(price / area)
+    return f"€{ppm:,}/m²".replace(",", " ")
 
 def fetch_feeds(districts, feeds_dict):
     listings = {}
@@ -502,14 +512,12 @@ def fetch_city24_listings(districts, category, intent):
                 total_floors = attrs.get("TOTAL_FLOORS")
                 floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
 
-                # Build full address with house and apartment number
                 full_address = street_name_raw
                 if house_number:
                     full_address += f" {house_number}"
                 if apartment_number:
                     full_address += f"-{apartment_number}"
 
-                # Build address slug for URL
                 county_slug = slugify(county_name_raw)
                 city_slug = slugify(city_name_raw)
                 street_slug = slugify(street_name_raw)
@@ -519,7 +527,6 @@ def fetch_city24_listings(districts, category, intent):
                 if street_slug:
                     parts.append(street_slug)
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
-
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
                 district_listings.append({
@@ -603,11 +610,14 @@ def process_user(user):
             address = match.get('street') or 'Nav'
             city_name = match.get('city_name', '')
             heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
+            price = match.get('price')
+            area = match.get('area')
             message += (
                 f"{i}. {icon} *{heading}*\n"
-                f"• Cena: {format_price(match['price'])}\n"
+                f"• Cena: {format_price(price)}\n"
+                f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
                 f"• Istabas: {rooms_str}\n"
-                f"• Platība: {format_area(match['area'])}\n"
+                f"• Platība: {format_area(area)}\n"
                 f"• Stāvs: {match['floor'] or 'Nav'}\n"
                 f"• [Skatīt sludinājumu]({match['url']})\n\n"
             )
