@@ -381,7 +381,6 @@ def fetch_listing_details(url):
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
-    # Clean up "Karte" suffix from SS.lv addresses
     if street_raw:
         street_raw = re.sub(r'\s+Karte\s*$', '', street_raw).strip()
     if not rooms_raw:
@@ -410,6 +409,7 @@ def fetch_listing_details(url):
         "price": normalize_int(price_raw),
         "floor": floor_raw,
         "street": street_raw,
+        "city_name": "",
         "url": url,
     }
 
@@ -502,7 +502,7 @@ def fetch_city24_listings(districts, category, intent):
                 total_floors = attrs.get("TOTAL_FLOORS")
                 floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
 
-                # Build full address
+                # Build full address with house and apartment number
                 full_address = street_name_raw
                 if house_number:
                     full_address += f" {house_number}"
@@ -525,6 +525,7 @@ def fetch_city24_listings(districts, category, intent):
                 district_listings.append({
                     "item_id": item_id,
                     "title": f"City24.lv — {full_address}, {city_name_raw}",
+                    "city_name": city_name_raw,
                     "rooms": rooms,
                     "area": float(area) if area else None,
                     "price": int(float(price_raw)) if price_raw else None,
@@ -591,19 +592,23 @@ def process_user(user):
     if matches:
         category_lv = "dzīvokļi" if category == "apartment" else "mājas"
         intent_lv = "pārdošanā" if intent == "buy" else "īrei"
+        icon = "🏢" if category == "apartment" else "🏡"
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
         message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
         message += f"📍 {district_names}\n\n"
         for i, match in enumerate(matches, start=1):
             rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
             source = match.get('source', 'SS.lv')
+            source_badge = "City24" if source == "City24.lv" else "SS.lv"
+            address = match.get('street') or 'Nav'
+            city_name = match.get('city_name', '')
+            heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
             message += (
-                f"{i}. *{source}*\n"
-                f"• Istabas: {rooms_str}\n"
+                f"{i}. {icon} *{heading}*\n"
                 f"• Cena: {format_price(match['price'])}\n"
+                f"• Istabas: {rooms_str}\n"
                 f"• Platība: {format_area(match['area'])}\n"
                 f"• Stāvs: {match['floor'] or 'Nav'}\n"
-                f"• Adrese: {match['street'] or 'Nav'}\n"
                 f"• [Skatīt sludinājumu]({match['url']})\n\n"
             )
         send_telegram_message(chat_id, message.strip())
