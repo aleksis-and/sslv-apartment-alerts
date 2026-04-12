@@ -359,7 +359,7 @@ def extract_field(text, label):
         ],
         "floor": [r"Stāvs:\s*([^\s]+)"],
         "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)"],
-        "city": [r"Vieta:\s*([^\|•\n]+)"],
+        "city": [r"Vieta:\s*([^\n\r|•<]{1,50})"],
     }
     for pattern in patterns.get(label, []):
         match = re.search(pattern, text, re.IGNORECASE)
