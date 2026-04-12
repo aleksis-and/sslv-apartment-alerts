@@ -382,7 +382,7 @@ def fetch_listing_details(url):
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
     if street_raw:
-        street_raw = re.sub(r'\s+Karte\s*$', '', street_raw).strip()
+        street_raw = re.sub(r'\s*\[?\s*Karte\s*\]?\s*$', '', street_raw).strip()
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
