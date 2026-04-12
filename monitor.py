@@ -18,6 +18,88 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 flask_app = Flask(__name__)
 
+# city24.lv district slug -> city24 city/district ID
+# For Riga districts, we pass city=245396 + district=ID
+# For other cities, we pass city=ID only
+CITY24_DISTRICT_MAP = {
+    # Riga districts
+    "centrs":                   {"city": 245396, "district": 270700},
+    "agenskalns":               {"city": 245396, "district": 270733},
+    "aplokciems":               {"city": 245396, "district": 270729},
+    "bergi":                    {"city": 245396, "district": 270722},
+    "bierini":                  {"city": 245396, "district": 270721},
+    "bolderaja":                {"city": 245396, "district": 270716},
+    "breksi":                   {"city": 245396, "district": 270749},
+    "ciekurkalns":              {"city": 245396, "district": 270699},
+    "darzciems":                {"city": 245396, "district": 270723},
+    "daugavgriva":              {"city": 245396, "district": 270728},
+    "dreilini":                 {"city": 245396, "district": 270724},
+    "dzeguzkalns":              {"city": 245396, "district": None},
+    "grizinkalns":              {"city": 245396, "district": 270737},
+    "ilguciems":                {"city": 245396, "district": 270738},
+    "imanta":                   {"city": 245396, "district": 270736},
+    "jaunciems":                {"city": 245396, "district": 270730},
+    "jugla":                    {"city": 245396, "district": 270726},
+    "kengarags":                {"city": 245396, "district": 270748},
+    "kipsala":                  {"city": 245396, "district": None},
+    "kliversala":               {"city": 245396, "district": 270745},
+    "krasta-r-ns":              {"city": 245396, "district": 270739},
+    "latgales-priekspilseta":   {"city": 245396, "district": 270742},
+    "mangali":                  {"city": 245396, "district": 270744},
+    "mezaparks":                {"city": 245396, "district": 270740},
+    "mezciems":                 {"city": 245396, "district": 270703},
+    "plavnieki":                {"city": 245396, "district": 270709},
+    "purvciems":                {"city": 245396, "district": 270704},
+    "sarkandaugava":            {"city": 245396, "district": 270707},
+    "sampeteris":               {"city": 245396, "district": 270705},
+    "teika":                    {"city": 245396, "district": 270708},
+    "tornakalns":               {"city": 245396, "district": 270712},
+    "vecaki":                   {"city": 245396, "district": 270711},
+    "vecmilgravis":             {"city": 245396, "district": 270719},
+    "vecriga":                  {"city": 245396, "district": 270718},
+    "ziepniekkalns":            {"city": 245396, "district": 270714},
+    "zolitude":                 {"city": 245396, "district": 270715},
+    "pardaugava":               {"city": 245396, "district": 270701},
+    "zasulauks":                {"city": 245396, "district": 270713},
+    "vef":                      {"city": 245396, "district": None},
+    "riga":                     {"city": 245396, "district": None},
+    # Other cities
+    "jurmala":                  {"city": 245372, "district": None},
+    "sigulda":                  {"city": 245404, "district": None},
+    "salaspils":                {"city": 245400, "district": None},
+    "marupe":                   {"city": 245387, "district": None},
+    "olaine":                   {"city": 245389, "district": None},
+    "adazu-nov":                {"city": 245423, "district": None},
+    "stopini":                  {"city": 245689, "district": None},
+    # Regional cities — no city24 presence, skip
+    "riga-region":              None,
+    "aizkraukle-and-reg":       None,
+    "aluksne-and-reg":          None,
+    "balvi-and-reg":            None,
+    "bauska-and-reg":           None,
+    "cesis-and-reg":            None,
+    "daugavpils-and-reg":       None,
+    "dobele-and-reg":           None,
+    "gulbene-and-reg":          None,
+    "jekabpils-and-reg":        None,
+    "jelgava-and-reg":          None,
+    "kraslava-and-reg":         None,
+    "kuldiga-and-reg":          None,
+    "liepaja-and-reg":          None,
+    "limbadzi-and-reg":         None,
+    "ludza-and-reg":            None,
+    "madona-and-reg":           None,
+    "ogre-and-reg":             None,
+    "preili-and-reg":           None,
+    "rezekne-and-reg":          None,
+    "saldus-and-reg":           None,
+    "talsi-and-reg":            None,
+    "tukums-and-reg":           None,
+    "valka-and-reg":            None,
+    "valmiera-and-reg":         None,
+    "ventspils-and-reg":        None,
+}
+
 APARTMENT_BUY_FEEDS = {
     "riga": "https://www.ss.lv/lv/real-estate/flats/riga/all/sell/rss/",
     "centrs": "https://www.ss.lv/lv/real-estate/flats/riga/centre/sell/rss/",
@@ -245,7 +327,7 @@ def send_telegram_message(chat_id, text):
 def normalize_int(value):
     if value is None:
         return None
-    value = value.replace(" ", "").replace(",", "").replace(".", "")
+    value = str(value).replace(" ", "").replace(",", "").replace(".", "")
     try:
         return int(value)
     except ValueError:
@@ -274,21 +356,16 @@ def fetch_listing_details(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
-
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
-
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;|&#160;", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-
     rooms_raw = extract_field(text, "rooms")
     area_raw = extract_field(text, "area")
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
-
-    # Fallback: extract rooms from title
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
@@ -304,13 +381,10 @@ def fetch_listing_details(url):
             title_rooms = re.search(r'(\d+)\s*-?\s*istabu', title, re.IGNORECASE)
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
-
-    # Fallback: extract price from title
     if not price_raw:
         title_price = re.search(r'(\d[\d\s]*)\s*€', title)
         if title_price:
             price_raw = title_price.group(1)
-
     return {
         "title": title,
         "rooms": int(rooms_raw) if rooms_raw and str(rooms_raw).strip().isdigit() else None,
@@ -340,7 +414,7 @@ def fetch_feeds(districts, feeds_dict):
         if not feed_url:
             logging.info(f"No feed for district: {district} — skipping")
             continue
-        logging.info(f"Checking feed: {feed_url}")
+        logging.info(f"Checking SS.lv feed: {feed_url}")
         feed = feedparser.parse(feed_url)
         district_listings = []
         for entry in feed.entries:
@@ -350,12 +424,82 @@ def fetch_feeds(districts, feeds_dict):
                 continue
             try:
                 details = fetch_listing_details(link)
-                details["item_id"] = item_id
+                details["item_id"] = "ss_" + item_id
+                details["source"] = "SS.lv"
                 district_listings.append(details)
             except Exception as e:
                 logging.error(f"Failed to parse {link}: {e}")
         listings[district] = district_listings
     return listings
+
+def fetch_city24_listings(districts, category, intent):
+    """Fetch listings from city24.lv API for given districts."""
+    unit_type = "Apartment" if category == "apartment" else "House"
+    ts_type = "sale" if intent == "buy" else "rent"
+    all_listings = {}
+
+    for district in districts:
+        mapping = CITY24_DISTRICT_MAP.get(district)
+        if not mapping:
+            continue  # No city24 mapping for this district
+
+        city_id = mapping["city"]
+        district_id = mapping.get("district")
+
+        params = {
+            "address[cc]": 2,
+            "address[city][]": city_id,
+            "tsType": ts_type,
+            "unitType": unit_type,
+            "adReach": 1,
+            "itemsPerPage": 50,
+            "page": 1,
+        }
+        if district_id:
+            params["address[district][]"] = district_id
+
+        try:
+            url = "https://api.city24.lv/lv_LV/search/realties"
+            headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            district_listings = []
+            for item in data:
+                item_id = "city24_" + str(item.get("id", ""))
+                friendly_id = item.get("friendly_id", "")
+                price_raw = item.get("price")
+                rooms = item.get("room_count")
+                area = item.get("property_size")
+                addr = item.get("address", {})
+                street = addr.get("street_name", "")
+                city_name = addr.get("city_name", "")
+                attrs = item.get("attributes", {})
+                floor = attrs.get("FLOOR")
+                total_floors = attrs.get("TOTAL_FLOORS")
+
+                listing_url = f"https://www.city24.lv/lv/real-estate/{'apartments' if category == 'apartment' else 'houses'}-for-{'sale' if intent == 'buy' else 'rent'}/{friendly_id}"
+
+                floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
+
+                district_listings.append({
+                    "item_id": item_id,
+                    "title": f"City24.lv — {street}, {city_name}",
+                    "rooms": rooms,
+                    "area": float(area) if area else None,
+                    "price": int(float(price_raw)) if price_raw else None,
+                    "floor": floor_str,
+                    "street": street,
+                    "url": listing_url,
+                    "source": "City24.lv",
+                })
+            all_listings[district] = district_listings
+            logging.info(f"City24 fetched {len(district_listings)} listings for {district}")
+        except Exception as e:
+            logging.error(f"City24 fetch failed for {district}: {e}")
+
+    return all_listings
 
 def get_feeds(category, intent):
     if category == 'house':
@@ -374,20 +518,23 @@ def process_user(user):
     intent = user.get("intent", "buy")
 
     feeds = get_feeds(category, intent)
-    listings_source = fetch_feeds(set(user_districts), feeds)
+    ss_listings = fetch_feeds(set(user_districts), feeds)
+    city24_listings = fetch_city24_listings(user_districts, category, intent)
+
     seen = load_seen_for_user(chat_id)
     new_seen = set()
     matches = []
 
+    # Merge both sources
     for district in user_districts:
-        for listing in listings_source.get(district, []):
+        combined = list(ss_listings.get(district, [])) + list(city24_listings.get(district, []))
+        for listing in combined:
             item_id = listing.get("item_id")
             if item_id in seen:
                 continue
             price = listing.get("price")
             rooms = listing.get("rooms")
             area = listing.get("area")
-
             if price is None or rooms is None:
                 new_seen.add(item_id)
                 continue
@@ -407,12 +554,13 @@ def process_user(user):
         category_lv = "dzīvokļi" if category == "apartment" else "mājas"
         intent_lv = "pārdošanā" if intent == "buy" else "īrei"
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
-        message = f"🏠 *Jauni SS.lv {category_lv} {intent_lv}*\n"
+        message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
         message += f"📍 {district_names}\n\n"
         for i, match in enumerate(matches, start=1):
             rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+            source = match.get('source', 'SS.lv')
             message += (
-                f"{i}. {match['title']}\n"
+                f"{i}. [{source}] {match['title']}\n"
                 f"• Istabas: {rooms_str}\n"
                 f"• Cena: {format_price(match['price'])}\n"
                 f"• Platība: {format_area(match['area'])}\n"
