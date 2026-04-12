@@ -18,11 +18,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 flask_app = Flask(__name__)
 
-# city24.lv district slug -> city24 city/district ID
-# For Riga districts, we pass city=245396 + district=ID
-# For other cities, we pass city=ID only
 CITY24_DISTRICT_MAP = {
-    # Riga districts
     "centrs":                   {"city": 245396, "district": 270700},
     "agenskalns":               {"city": 245396, "district": 270733},
     "aplokciems":               {"city": 245396, "district": 270729},
@@ -63,7 +59,6 @@ CITY24_DISTRICT_MAP = {
     "zasulauks":                {"city": 245396, "district": 270713},
     "vef":                      {"city": 245396, "district": None},
     "riga":                     {"city": 245396, "district": None},
-    # Other cities
     "jurmala":                  {"city": 245372, "district": None},
     "sigulda":                  {"city": 245404, "district": None},
     "salaspils":                {"city": 245400, "district": None},
@@ -71,33 +66,32 @@ CITY24_DISTRICT_MAP = {
     "olaine":                   {"city": 245389, "district": None},
     "adazu-nov":                {"city": 245423, "district": None},
     "stopini":                  {"city": 245689, "district": None},
-    # Regional cities — no city24 presence, skip
-    "riga-region":          {"city": 245330, "district": None},  # Ropažu nov. as proxy
-    "aizkraukle-and-reg":   {"city": 245346, "district": None},
-    "aluksne-and-reg":      {"city": 245350, "district": None},
-    "balvi-and-reg":        None,  # No Balvi in list
-    "bauska-and-reg":       {"city": 245356, "district": None},
-    "cesis-and-reg":        {"city": 245359, "district": None},
-    "daugavpils-and-reg":   {"city": 245361, "district": None},
-    "dobele-and-reg":       {"city": 245362, "district": None},
-    "gulbene-and-reg":      {"city": 245365, "district": None},
-    "jekabpils-and-reg":    {"city": 245371, "district": None},
-    "jelgava-and-reg":      {"city": 245370, "district": None},
-    "kraslava-and-reg":     {"city": 245375, "district": None},
-    "kuldiga-and-reg":      {"city": 245376, "district": None},
-    "liepaja-and-reg":      {"city": 245379, "district": None},
-    "limbadzi-and-reg":     None,  # No Limbaži in list
-    "ludza-and-reg":        {"city": 245382, "district": None},
-    "madona-and-reg":       {"city": 245385, "district": None},
-    "ogre-and-reg":         {"city": 245388, "district": None},
-    "preili-and-reg":       None,  # No Preiļi in list
-    "rezekne-and-reg":      {"city": 245395, "district": None},
-    "saldus-and-reg":       None,  # No Saldus in list
-    "talsi-and-reg":        {"city": 245411, "district": None},
-    "tukums-and-reg":       {"city": 245412, "district": None},
-    "valka-and-reg":        None,  # No Valka in list
-    "valmiera-and-reg":     {"city": 245415, "district": None},
-    "ventspils-and-reg":    {"city": 245418, "district": None},
+    "riga-region":              {"city": 245330, "district": None},
+    "aizkraukle-and-reg":       {"city": 245346, "district": None},
+    "aluksne-and-reg":          {"city": 245350, "district": None},
+    "balvi-and-reg":            None,
+    "bauska-and-reg":           {"city": 245356, "district": None},
+    "cesis-and-reg":            {"city": 245359, "district": None},
+    "daugavpils-and-reg":       {"city": 245361, "district": None},
+    "dobele-and-reg":           {"city": 245362, "district": None},
+    "gulbene-and-reg":          {"city": 245365, "district": None},
+    "jekabpils-and-reg":        {"city": 245371, "district": None},
+    "jelgava-and-reg":          {"city": 245370, "district": None},
+    "kraslava-and-reg":         {"city": 245375, "district": None},
+    "kuldiga-and-reg":          {"city": 245376, "district": None},
+    "liepaja-and-reg":          {"city": 245379, "district": None},
+    "limbadzi-and-reg":         None,
+    "ludza-and-reg":            {"city": 245382, "district": None},
+    "madona-and-reg":           {"city": 245385, "district": None},
+    "ogre-and-reg":             {"city": 245388, "district": None},
+    "preili-and-reg":           None,
+    "rezekne-and-reg":          {"city": 245395, "district": None},
+    "saldus-and-reg":           None,
+    "talsi-and-reg":            {"city": 245411, "district": None},
+    "tukums-and-reg":           {"city": 245412, "district": None},
+    "valka-and-reg":            None,
+    "valmiera-and-reg":         {"city": 245415, "district": None},
+    "ventspils-and-reg":        {"city": 245418, "district": None},
 }
 
 APARTMENT_BUY_FEEDS = {
@@ -310,6 +304,22 @@ DISTRICT_NAMES = {
     "ventspils-and-reg": "Ventspils un rajons",
 }
 
+def slugify(text):
+    if not text:
+        return ""
+    replacements = {
+        'ā': 'a', 'č': 'c', 'ē': 'e', 'ģ': 'g', 'ī': 'i',
+        'ķ': 'k', 'ļ': 'l', 'ņ': 'n', 'š': 's', 'ū': 'u', 'ž': 'z',
+        'Ā': 'a', 'Č': 'c', 'Ē': 'e', 'Ģ': 'g', 'Ī': 'i',
+        'Ķ': 'k', 'Ļ': 'l', 'Ņ': 'n', 'Š': 's', 'Ū': 'u', 'Ž': 'z',
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    text = text.strip('-')
+    return text
+
 def load_seen_for_user(chat_id):
     result = supabase.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
     return set(row["id"] for row in result.data)
@@ -433,15 +443,16 @@ def fetch_feeds(districts, feeds_dict):
     return listings
 
 def fetch_city24_listings(districts, category, intent):
-    """Fetch listings from city24.lv API for given districts."""
     unit_type = "Apartment" if category == "apartment" else "House"
     ts_type = "sale" if intent == "buy" else "rent"
+    listing_type = "apartments" if category == "apartment" else "houses"
+    listing_intent = "sale" if intent == "buy" else "rent"
     all_listings = {}
 
     for district in districts:
         mapping = CITY24_DISTRICT_MAP.get(district)
         if not mapping:
-            continue  # No city24 mapping for this district
+            continue
 
         city_id = mapping["city"]
         district_id = mapping.get("district")
@@ -473,24 +484,35 @@ def fetch_city24_listings(districts, category, intent):
                 rooms = item.get("room_count")
                 area = item.get("property_size")
                 addr = item.get("address", {})
-                street = addr.get("street_name", "")
-                city_name = addr.get("city_name", "")
+                street_name_raw = addr.get("street_name", "")
+                city_name_raw = addr.get("city_name", "")
+                county_name_raw = addr.get("county_name") or city_name_raw
                 attrs = item.get("attributes", {})
                 floor = attrs.get("FLOOR")
                 total_floors = attrs.get("TOTAL_FLOORS")
-
-                listing_url = f"https://www.city24.lv/lv/real-estate/{'apartments' if category == 'apartment' else 'houses'}-for-{'sale' if intent == 'buy' else 'rent'}/{friendly_id}"
-
                 floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
+
+                # Build address slug for URL
+                county_slug = slugify(county_name_raw)
+                city_slug = slugify(city_name_raw)
+                street_slug = slugify(street_name_raw)
+                parts = [county_slug]
+                if city_slug and city_slug != county_slug:
+                    parts.append(city_slug)
+                if street_slug:
+                    parts.append(street_slug)
+                address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
+
+                listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
                 district_listings.append({
                     "item_id": item_id,
-                    "title": f"City24.lv — {street}, {city_name}",
+                    "title": f"City24.lv — {street_name_raw}, {city_name_raw}",
                     "rooms": rooms,
                     "area": float(area) if area else None,
                     "price": int(float(price_raw)) if price_raw else None,
                     "floor": floor_str,
-                    "street": street,
+                    "street": street_name_raw,
                     "url": listing_url,
                     "source": "City24.lv",
                 })
@@ -525,7 +547,6 @@ def process_user(user):
     new_seen = set()
     matches = []
 
-    # Merge both sources
     for district in user_districts:
         combined = list(ss_listings.get(district, [])) + list(city24_listings.get(district, []))
         for listing in combined:
@@ -560,13 +581,13 @@ def process_user(user):
             rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
             source = match.get('source', 'SS.lv')
             message += (
-                f"{i}. [{source}] {match['title']}\n"
+                f"{i}. *{source}*\n"
                 f"• Istabas: {rooms_str}\n"
                 f"• Cena: {format_price(match['price'])}\n"
                 f"• Platība: {format_area(match['area'])}\n"
                 f"• Stāvs: {match['floor'] or 'Nav'}\n"
                 f"• Adrese: {match['street'] or 'Nav'}\n"
-                f"• Saite: {match['url']}\n\n"
+                f"• [Skatīt sludinājumu]({match['url']})\n\n"
             )
         send_telegram_message(chat_id, message.strip())
         logging.info(f"Sent {len(matches)} matches to {chat_id}")
