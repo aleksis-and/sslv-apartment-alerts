@@ -359,7 +359,6 @@ def extract_field(text, label):
         ],
         "floor": [r"Stāvs:\s*([^\s]+)"],
         "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)"],
-        "city": [r"Vieta:\s*([^\|•\n]+)"],
     }
     for pattern in patterns.get(label, []):
         match = re.search(pattern, text, re.IGNORECASE)
@@ -382,11 +381,8 @@ def fetch_listing_details(url):
     price_raw = extract_field(text, "price")
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
-    city_raw = extract_field(text, "city")
     if street_raw:
         street_raw = re.sub(r'\s*\[?\s*Karte\s*\]?\s*$', '', street_raw).strip()
-    if city_raw:
-        city_raw = city_raw.strip().rstrip('|').strip()
     if not rooms_raw:
         word_to_num = {
             "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
@@ -413,7 +409,7 @@ def fetch_listing_details(url):
         "price": normalize_int(price_raw),
         "floor": floor_raw,
         "street": street_raw,
-        "city_name": city_raw or "",
+        "city_name": "",
         "url": url,
     }
 
@@ -608,7 +604,8 @@ def process_user(user):
             source = match.get('source', 'SS.lv')
             source_badge = "City24" if source == "City24.lv" else "SS.lv"
             address = match.get('street') or 'Nav'
-            city_name = match.get('city_name', '')
+            # City24 has clean city_name from API, SS.lv city parsing is unreliable so skip it
+            city_name = match.get('city_name', '') if source == "City24.lv" else ""
             heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
             price = match.get('price')
             area = match.get('area')
