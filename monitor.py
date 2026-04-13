@@ -351,14 +351,14 @@ def normalize_int(value):
 def extract_field(text, label):
     patterns = {
         "rooms": [r"Istabas:\s*(\d+)"],
-        "area": [r"Platība:\s*(\d+(?:[.,]\d+)?)\s*m[²2]"],
+        "area": [r"(?<![a-zA-ZāčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ])Platība:\s*(\d+(?:[.,]\d+)?)\s*m[²2]"],
         "price": [
             r"Cena:\s*([\d\s.,]+)\s*€",
             r"cena\s+([\d\s]+)\s*€",
             r"(\d[\d\s]*)\s*€",
         ],
-        "floor": [r"Stāvs:\s*([^\s]+)"],
-        "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Sērija:|Mājas tips:|Ērtības:|Cena:)"],
+        "floor": [r"Stāvs:\s*([^\s]+)", r"Stāvu skaits:\s*(\d+)"],
+        "street": [r"Iela:\s*(.+?)\s+(?:Istabas:|Platība:|Stāvs:|Stāvu skaits:|Sērija:|Mājas tips:|Ērtības:|Cena:|Zemes platība:)"],
     }
     for pattern in patterns.get(label, []):
         match = re.search(pattern, text, re.IGNORECASE)
@@ -577,10 +577,14 @@ def process_user(user):
             price = listing.get("price")
             rooms = listing.get("rooms")
             area = listing.get("area")
-            if price is None or rooms is None:
+            if price is None:
                 new_seen.add(item_id)
                 continue
-            if user_rooms and rooms not in user_rooms:
+            # For houses, rooms filter is optional since some listings don't specify rooms
+            if category == 'apartment' and rooms is None:
+                new_seen.add(item_id)
+                continue
+            if user_rooms and rooms is not None and rooms not in user_rooms:
                 new_seen.add(item_id)
                 continue
             if not (min_price <= price <= max_price):
@@ -604,7 +608,6 @@ def process_user(user):
             source = match.get('source', 'SS.lv')
             source_badge = "City24" if source == "City24.lv" else "SS.lv"
             address = match.get('street') or 'Nav'
-            # City24 has clean city_name from API, SS.lv city parsing is unreliable so skip it
             city_name = match.get('city_name', '') if source == "City24.lv" else ""
             heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
             price = match.get('price')
