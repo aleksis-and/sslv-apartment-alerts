@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -339,6 +340,78 @@ def send_telegram_message(chat_id, text):
         "disable_web_page_preview": True
     }, timeout=30)
 
+def send_email_message(to_email, subject, html_content):
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "Paziņojumi <no-reply@pazinojumi.lv>",
+                "to": [to_email],
+                "subject": subject,
+                "html": html_content
+            },
+            timeout=30
+        )
+        if response.status_code == 200:
+            logging.info(f"Email sent to {to_email}")
+        else:
+            logging.error(f"Email failed: {response.status_code} {response.text}")
+    except Exception as e:
+        logging.error(f"Email error: {e}")
+
+def build_email_html(matches, category, intent, district_names):
+    category_lv = "dzīvokļi" if category == "apartment" else "mājas"
+    intent_lv = "pārdošanā" if intent == "buy" else "īrei"
+    icon = "🏢" if category == "apartment" else "🏡"
+
+    items_html = ""
+    for i, match in enumerate(matches, start=1):
+        rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+        source = match.get('source', 'SS.lv')
+        source_badge = "City24" if source == "City24.lv" else "SS.lv"
+        address = match.get('street') or 'Nav'
+        city_name = match.get('city_name', '') if source == "City24.lv" else ""
+        heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
+        price = match.get('price')
+        area = match.get('area')
+
+        items_html += f"""
+        <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
+            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {heading}</p>
+            <table style="width:100%;border-collapse:collapse;">
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;width:100px;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;">{format_price(price)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;">{format_price_per_sqm(price, area)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{rooms_str}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;">{format_area(area)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{match['floor'] or 'Nav'}</td></tr>
+            </table>
+            <a href="{match['url']}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
+        </div>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head>
+    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fffdf9;margin:0;padding:20px;">
+        <div style="max-width:560px;margin:0 auto;">
+            <div style="text-align:center;margin-bottom:24px;">
+                <h1 style="font-size:22px;font-weight:700;color:#1a1a1a;margin:0;">Jauni {category_lv} {intent_lv}</h1>
+                <p style="color:#888;font-size:14px;margin-top:6px;">📍 {district_names}</p>
+            </div>
+            {items_html}
+            <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #f0ece4;">
+                <p style="color:#bbb;font-size:11px;">Atteikties no paziņojumiem — <a href="https://pazinojumi.lv" style="color:#f5a623;">pazinojumi.lv</a></p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
 def normalize_int(value):
     if value is None:
         return None
@@ -559,6 +632,8 @@ def process_user(user):
     user_districts = user.get("districts", [])
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
+    channel = user.get("channel", "telegram")
+    email = user.get("email", "")
 
     feeds = get_feeds(category, intent)
     ss_listings = fetch_feeds(set(user_districts), feeds)
@@ -580,7 +655,6 @@ def process_user(user):
             if price is None:
                 new_seen.add(item_id)
                 continue
-            # For houses, rooms filter is optional since some listings don't specify rooms
             if category == 'apartment' and rooms is None:
                 new_seen.add(item_id)
                 continue
@@ -601,28 +675,34 @@ def process_user(user):
         intent_lv = "pārdošanā" if intent == "buy" else "īrei"
         icon = "🏢" if category == "apartment" else "🏡"
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
-        message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
-        message += f"📍 {district_names}\n\n"
-        for i, match in enumerate(matches, start=1):
-            rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
-            source = match.get('source', 'SS.lv')
-            source_badge = "City24" if source == "City24.lv" else "SS.lv"
-            address = match.get('street') or 'Nav'
-            city_name = match.get('city_name', '') if source == "City24.lv" else ""
-            heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
-            price = match.get('price')
-            area = match.get('area')
-            message += (
-                f"{i}. {icon} *{heading}*\n"
-                f"• Cena: {format_price(price)}\n"
-                f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
-                f"• Istabas: {rooms_str}\n"
-                f"• Platība: {format_area(area)}\n"
-                f"• Stāvs: {match['floor'] or 'Nav'}\n"
-                f"• [Skatīt sludinājumu]({match['url']})\n\n"
-            )
-        send_telegram_message(chat_id, message.strip())
-        logging.info(f"Sent {len(matches)} matches to {chat_id}")
+
+        if channel == "email" and email:
+            subject = f"Jauni {category_lv} {intent_lv} — {district_names}"
+            html = build_email_html(matches, category, intent, district_names)
+            send_email_message(email, subject, html)
+        else:
+            message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
+            message += f"📍 {district_names}\n\n"
+            for i, match in enumerate(matches, start=1):
+                rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+                source = match.get('source', 'SS.lv')
+                source_badge = "City24" if source == "City24.lv" else "SS.lv"
+                address = match.get('street') or 'Nav'
+                city_name = match.get('city_name', '') if source == "City24.lv" else ""
+                heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
+                price = match.get('price')
+                area = match.get('area')
+                message += (
+                    f"{i}. {icon} *{heading}*\n"
+                    f"• Cena: {format_price(price)}\n"
+                    f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
+                    f"• Istabas: {rooms_str}\n"
+                    f"• Platība: {format_area(area)}\n"
+                    f"• Stāvs: {match['floor'] or 'Nav'}\n"
+                    f"• [Skatīt sludinājumu]({match['url']})\n\n"
+                )
+            send_telegram_message(chat_id, message.strip())
+        logging.info(f"Sent {len(matches)} matches to {chat_id} via {channel}")
     else:
         logging.info(f"No matches for {chat_id}")
 
