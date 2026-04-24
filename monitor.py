@@ -388,12 +388,14 @@ def send_push_notification(push_token, title, body):
 
 def save_listings_to_db(user, matches, district_names):
     user_id = user.get("id")
+    auth_user_id = user.get("auth_user_id")
     if not user_id:
         return
     rows = []
     for match in matches:
         rows.append({
             "user_id": user_id,
+            "auth_user_id": auth_user_id,
             "title": match.get("title", ""),
             "price": match.get("price"),
             "rooms": match.get("rooms"),
