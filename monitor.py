@@ -363,6 +363,55 @@ def send_email_message(to_email, subject, html_content):
     except Exception as e:
         logging.error(f"Email error: {e}")
 
+def send_push_notification(push_token, title, body):
+    if not push_token:
+        return
+    try:
+        response = requests.post(
+            "https://exp.host/--/api/v2/push/send",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            json={
+                "to": push_token,
+                "title": title,
+                "body": body,
+                "sound": "default",
+                "data": {}
+            },
+            timeout=30
+        )
+        logging.info(f"Push sent: {response.status_code} {response.text}")
+    except Exception as e:
+        logging.error(f"Push error: {e}")
+
+def save_listings_to_db(user, matches, district_names):
+    user_id = user.get("id")
+    if not user_id:
+        return
+    rows = []
+    for match in matches:
+        rows.append({
+            "user_id": user_id,
+            "title": match.get("title", ""),
+            "price": match.get("price"),
+            "rooms": match.get("rooms"),
+            "area": match.get("area"),
+            "district": district_names,
+            "url": match.get("url", ""),
+            "image_url": None,
+            "source": match.get("source", "SS.lv"),
+            "seen": False,
+            "saved": False,
+        })
+    if rows:
+        try:
+            supabase.table("listings").insert(rows).execute()
+            logging.info(f"Saved {len(rows)} listings to DB for user {user_id}")
+        except Exception as e:
+            logging.error(f"Failed to save listings to DB: {e}")
+
 def build_email_html(matches, category, intent, district_names):
     category_lv = "dzīvokļi" if category == "apartment" else "mājas"
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
@@ -680,6 +729,16 @@ def process_user(user):
             subject = f"Jauni {category_lv} {intent_lv} — {district_names}"
             html = build_email_html(matches, category, intent, district_names)
             send_email_message(email, subject, html)
+
+        elif channel == "push":
+            push_token = user.get("push_token")
+            save_listings_to_db(user, matches, district_names)
+            send_push_notification(
+                push_token,
+                f"{len(matches)} jauni sludinājumi",
+                f"{matches[0].get('street') or category_lv} — {format_price(matches[0].get('price'))}"
+            )
+
         else:
             message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
             message += f"📍 {district_names}\n\n"
@@ -702,6 +761,7 @@ def process_user(user):
                     f"• [Skatīt sludinājumu]({match['url']})\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
+
         logging.info(f"Sent {len(matches)} matches to {chat_id} via {channel}")
     else:
         logging.info(f"No matches for {chat_id}")
