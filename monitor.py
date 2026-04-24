@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 
@@ -409,7 +410,7 @@ def save_listings_to_db(user, matches, district_names):
         })
     if rows:
         try:
-            supabase.table("listings").insert(rows).execute()
+            supabase_admin.table("listings").insert(rows).execute()
             logging.info(f"Saved {len(rows)} listings to DB for user {user_id}")
         except Exception as e:
             logging.error(f"Failed to save listings to DB: {e}")
