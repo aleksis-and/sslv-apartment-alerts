@@ -682,7 +682,7 @@ def fetch_city24_listings(districts, category, intent):
                 if isinstance(main_image, dict):
                     raw_url = main_image.get("url") or main_image.get("large_url")
                     if raw_url:
-                        image_url = raw_url.replace("{fmt:em}", "800x600")
+                        image_url = raw_url.replace("{fmt:em}", "24")
 
                 district_listings.append({
                     "item_id": item_id,
