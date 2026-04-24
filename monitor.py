@@ -499,13 +499,27 @@ def fetch_listing_details(url):
     response.raise_for_status()
     html = response.text
 
-    # Extract og:image
+    # Extract image — try og:image first
     image_url = None
     og_image = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
     if not og_image:
         og_image = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
     if og_image:
         image_url = og_image.group(1).strip()
+
+    # SS.lv specific image pattern
+    if not image_url:
+        ss_image = re.search(r'src="(https://im\.ss\.lv/[^"]+\.(?:jpg|jpeg|png|webp))"', html, re.IGNORECASE)
+        if ss_image:
+            image_url = ss_image.group(1).strip()
+
+    # Fallback to any image
+    if not image_url:
+        any_image = re.search(r'<img[^>]+src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', html, re.IGNORECASE)
+        if any_image:
+            candidate = any_image.group(1).strip()
+            if candidate.startswith('http'):
+                image_url = candidate
 
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
@@ -662,6 +676,12 @@ def fetch_city24_listings(districts, category, intent):
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
+                # Get image from City24 API
+                main_image = item.get("main_image")
+                image_url = None
+                if isinstance(main_image, dict):
+                    image_url = main_image.get("url") or main_image.get("large_url")
+
                 district_listings.append({
                     "item_id": item_id,
                     "title": f"City24.lv — {full_address}, {city_name_raw}",
@@ -673,6 +693,7 @@ def fetch_city24_listings(districts, category, intent):
                     "street": full_address,
                     "url": listing_url,
                     "source": "City24.lv",
+                    "image_url": image_url,
                 })
             all_listings[district] = district_listings
             logging.info(f"City24 fetched {len(district_listings)} listings for {district}")
