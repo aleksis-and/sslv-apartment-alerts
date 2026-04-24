@@ -405,7 +405,7 @@ def save_listings_to_db(user, matches, district_names):
             "area": match.get("area"),
             "district": district_names,
             "url": match.get("url", ""),
-            "image_url": None,
+            "image_url": match.get("image_url"),
             "source": match.get("source", "SS.lv"),
             "seen": False,
             "saved": False,
@@ -498,6 +498,15 @@ def fetch_listing_details(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
+
+    # Extract og:image
+    image_url = None
+    og_image = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if not og_image:
+        og_image = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
+    if og_image:
+        image_url = og_image.group(1).strip()
+
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
     text = re.sub(r"<[^>]+>", " ", html)
@@ -538,6 +547,7 @@ def fetch_listing_details(url):
         "street": street_raw,
         "city_name": "",
         "url": url,
+        "image_url": image_url,
     }
 
 def format_price(price):
