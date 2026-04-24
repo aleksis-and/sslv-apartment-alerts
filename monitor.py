@@ -739,6 +739,7 @@ def process_user(user):
             price = listing.get("price")
             rooms = listing.get("rooms")
             area = listing.get("area")
+            logging.info(f"Listing: {listing.get('url')} | rooms={rooms} | price={price} | area={area}")
             if price is None:
                 new_seen.add(item_id)
                 continue
