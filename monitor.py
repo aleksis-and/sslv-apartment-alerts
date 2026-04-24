@@ -676,6 +676,7 @@ def fetch_city24_listings(districts, category, intent):
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
+                logging.info(f"City24 image data for {item.get('id')}: {item.get('main_image')}")
                 # Get image from City24 API
                 main_image = item.get("main_image")
                 image_url = None
