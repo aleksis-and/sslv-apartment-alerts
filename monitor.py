@@ -17,6 +17,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 flask_app = Flask(__name__)
 
@@ -388,6 +389,7 @@ def send_push_notification(push_token, title, body):
         logging.error(f"Push error: {e}")
 
 def save_listings_to_db(user, matches, district_names):
+    global supabase_admin
     user_id = user.get("id")
     auth_user_id = user.get("auth_user_id")
     if not user_id:
