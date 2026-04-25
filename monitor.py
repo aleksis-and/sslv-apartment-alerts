@@ -623,7 +623,7 @@ def fetch_ss_full_page(districts, feeds_dict):
         district_listings = []
         page = 1
 
-        while page <= 3:  # scan up to 3 pages (~75 listings)
+        while page <= 3:  # scan up to 5 pages (~125 listings)
             try:
                 paginated_url = page_url if page == 1 else f"{page_url}page{page}/"
                 logging.info(f"Scraping SS.lv page: {paginated_url}")
@@ -633,7 +633,7 @@ def fetch_ss_full_page(districts, feeds_dict):
 
                 # Extract listing URLs
                 links = re.findall(
-                    r'href="(/msg/lv/real-estate/[^"]+\.html)"',
+                    r'href="(/msg/lv/[^"]+\.html)"',
                     html
                 )
                 links = list(dict.fromkeys(links))  # deduplicate
