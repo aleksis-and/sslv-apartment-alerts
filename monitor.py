@@ -625,7 +625,7 @@ def fetch_ss_full_page(districts, feeds_dict):
 
         while page <= 3:  # scan up to 5 pages (~125 listings)
             try:
-                paginated_url = page_url if page == 1 else f"{page_url}page{page}/"
+                paginated_url = page_url if page == 1 else f"{page_url}page{page}.html"
                 logging.info(f"Scraping SS.lv page: {paginated_url}")
                 response = requests.get(paginated_url, headers=headers, timeout=30)
                 response.raise_for_status()
@@ -652,7 +652,7 @@ def fetch_ss_full_page(districts, feeds_dict):
                         logging.error(f"Failed to parse {url}: {e}")
 
                 # Check if there's a next page
-                if f"page{page + 1}" not in html:
+                if f"page{page + 1}.html" not in html:
                     break
                 page += 1
 
