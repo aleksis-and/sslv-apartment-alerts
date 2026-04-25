@@ -15,6 +15,8 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
+RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "false").lower() in ("1", "true", "yes", "on")
+RUN_FOR_USER_API_KEY = os.environ.get("RUN_FOR_USER_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -466,11 +468,74 @@ def build_email_html(matches, category, intent, district_names):
 def normalize_int(value):
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
     value = str(value).replace(" ", "").replace(",", "").replace(".", "")
     try:
         return int(value)
     except ValueError:
         return None
+
+def normalize_float(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    value = str(value).replace(" ", "").replace(",", ".")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def normalize_filter_int(value, default):
+    normalized = normalize_int(value)
+    return default if normalized is None else normalized
+
+def normalize_filter_float(value, default):
+    normalized = normalize_float(value)
+    return default if normalized is None else normalized
+
+def normalize_room_value(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    value = str(value).strip()
+    if not value:
+        return None
+    try:
+        parsed = float(value.replace(",", "."))
+    except ValueError:
+        return None
+    return int(parsed) if parsed.is_integer() else None
+
+def normalize_room_filters(rooms):
+    if not rooms:
+        return []
+    if isinstance(rooms, str):
+        rooms = rooms.strip().strip("[]{}")
+        rooms = [part.strip().strip('"\'') for part in rooms.split(",")]
+    elif not isinstance(rooms, (list, tuple, set)):
+        rooms = [rooms]
+    normalized = []
+    for room in rooms:
+        room_value = normalize_room_value(room)
+        if room_value is not None:
+            normalized.append(room_value)
+    return sorted(set(normalized))
+
+def format_query_value(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 def extract_field(text, label):
     patterns = {
@@ -615,19 +680,20 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
         # Build query params using SS.lv filter format
         params = []
         if min_price:
-            params.append(f"topt[1][min]={min_price}")
+            params.append(f"topt[1][min]={format_query_value(min_price)}")
         if max_price:
-            params.append(f"topt[1][max]={max_price}")
+            params.append(f"topt[1][max]={format_query_value(max_price)}")
         if min_area:
-            params.append(f"topt[3][min]={min_area}")
+            params.append(f"topt[3][min]={format_query_value(min_area)}")
         if max_area:
-            params.append(f"topt[3][max]={max_area}")
+            params.append(f"topt[3][max]={format_query_value(max_area)}")
         if user_rooms:
             for r in user_rooms:
                 params.append(f"topt[4][]={r}")
 
         query_string = "&".join(params)
         district_listings = []
+        district_seen_paths = set()
         page = 1
 
         while page <= 5:
@@ -645,11 +711,13 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                 # Extract listing URLs
                 links = re.findall(r'href="(/msg/lv/[^"]+\.html)"', html)
                 links = list(dict.fromkeys(links))  # deduplicate
+                new_links = [path for path in links if path not in district_seen_paths]
 
-                if not links:
+                if not new_links:
                     break
+                district_seen_paths.update(new_links)
 
-                for path in links:
+                for path in new_links:
                     url = f"https://www.ss.lv{path}"
                     try:
                         details = fetch_listing_details(url)
@@ -659,8 +727,6 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                     except Exception as e:
                         logging.error(f"Failed to parse {url}: {e}")
 
-                if f"page{page + 1}.html" not in html:
-                    break
                 page += 1
 
             except Exception as e:
@@ -773,13 +839,22 @@ def get_feeds(category, intent):
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
 
+def is_internal_request_authorized():
+    if not RUN_FOR_USER_API_KEY:
+        logging.warning("RUN_FOR_USER_API_KEY is not set; /run-for-user is not protected")
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    bearer_token = auth_header.removeprefix("Bearer ").strip()
+    api_key = request.headers.get("X-Internal-Api-Key", "").strip()
+    return RUN_FOR_USER_API_KEY in (bearer_token, api_key)
+
 def process_user(user, full_scan=False):
     chat_id = user["chat_id"]
-    min_price = user.get("min_price", 0)
-    max_price = user.get("max_price", 9999999)
-    min_area = user.get("min_area", 0)
-    max_area = user.get("max_area", 9999)
-    user_rooms = user.get("rooms") or []
+    min_price = normalize_filter_int(user.get("min_price"), 0)
+    max_price = normalize_filter_int(user.get("max_price"), 9999999)
+    min_area = normalize_filter_float(user.get("min_area"), 0)
+    max_area = normalize_filter_float(user.get("max_area"), 9999)
+    user_rooms = normalize_room_filters(user.get("rooms"))
     user_districts = user.get("districts", [])
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
@@ -809,25 +884,36 @@ def process_user(user, full_scan=False):
 
     for district in user_districts:
         combined = list(ss_listings.get(district, [])) + list(city24_listings.get(district, []))
+        logging.info(f"{district}: combined listings before filtering: {len(combined)}")
         for listing in combined:
             item_id = listing.get("item_id")
-            if item_id in seen:
+            if not item_id:
+                logging.info(f"SKIP missing item_id: {listing.get('url')}")
                 continue
-            price = listing.get("price")
-            rooms = listing.get("rooms")
-            area = listing.get("area")
+            if item_id in seen:
+                logging.info(f"SKIP already seen: {item_id}")
+                continue
+            price = normalize_int(listing.get("price"))
+            rooms = normalize_room_value(listing.get("rooms"))
+            area = normalize_float(listing.get("area"))
+
             if price is None:
-                new_seen.add(item_id)
+                logging.info(f"SKIP missing price: {listing.get('url')}")
                 continue
             if user_rooms and rooms is not None and rooms not in user_rooms:
-                new_seen.add(item_id)
+                logging.info(f"SKIP rooms mismatch: rooms={rooms}, wanted={user_rooms}, url={listing.get('url')}")
                 continue
             if not (min_price <= price <= max_price):
-                new_seen.add(item_id)
+                logging.info(f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
                 continue
             if area is not None and not (min_area <= area <= max_area):
-                new_seen.add(item_id)
+                logging.info(f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
                 continue
+
+            listing["price"] = price
+            listing["rooms"] = rooms
+            listing["area"] = area
+            logging.info(f"MATCH: price={price}, rooms={rooms}, area={area}, url={listing.get('url')}")
             matches.append(listing)
             new_seen.add(item_id)
 
@@ -888,12 +974,14 @@ def run():
     if not users:
         return
     for user in users:
-        process_user(user)
+        process_user(user, full_scan=RUN_FULL_SS_SCAN)
     logging.info("Run complete.")
 
 @flask_app.route("/run-for-user", methods=["POST"])
 def run_for_user():
-    data = request.get_json()
+    if not is_internal_request_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
     chat_id = data.get("chat_id")
     if not chat_id:
         return jsonify({"error": "chat_id required"}), 400

@@ -36,6 +36,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RUN_FULL_SS_SCAN: "true"
+          RUN_FOR_USER_API_KEY: ${{ secrets.RUN_FOR_USER_API_KEY }}
 
       - name: Commit updated seen_ids.json
         run: |
