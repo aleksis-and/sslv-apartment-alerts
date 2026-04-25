@@ -542,11 +542,11 @@ def fetch_listing_details(url):
         }
         search_text = (title + " " + text).lower()
         for word, num in word_to_num.items():
-            if word in title.lower():
+            if word in search_text:
                 rooms_raw = num
                 break
         if not rooms_raw:
-            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', title, re.IGNORECASE)
+            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', search_text, re.IGNORECASE)
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
     if not price_raw:
@@ -606,6 +606,63 @@ def fetch_feeds(districts, feeds_dict):
             except Exception as e:
                 logging.error(f"Failed to parse {link}: {e}")
         listings[district] = district_listings
+    return listings
+
+def fetch_ss_full_page(districts, feeds_dict):
+    """Scrape full SS.lv search pages — used for initial scan on alert creation."""
+    listings = {}
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
+
+    for district in districts:
+        feed_url = feeds_dict.get(district)
+        if not feed_url:
+            continue
+
+        # Convert RSS URL to search page URL
+        page_url = feed_url.replace("/rss/", "/")
+        district_listings = []
+        page = 1
+
+        while page <= 3:  # scan up to 3 pages (~75 listings)
+            try:
+                paginated_url = page_url if page == 1 else f"{page_url}page{page}/"
+                logging.info(f"Scraping SS.lv page: {paginated_url}")
+                response = requests.get(paginated_url, headers=headers, timeout=30)
+                response.raise_for_status()
+                html = response.text
+
+                # Extract listing URLs
+                links = re.findall(
+                    r'href="(/msg/lv/real-estate/[^"]+\.html)"',
+                    html
+                )
+                links = list(dict.fromkeys(links))  # deduplicate
+
+                if not links:
+                    break
+
+                for path in links:
+                    url = f"https://www.ss.lv{path}"
+                    try:
+                        details = fetch_listing_details(url)
+                        details["item_id"] = "ss_" + url
+                        details["source"] = "SS.lv"
+                        district_listings.append(details)
+                    except Exception as e:
+                        logging.error(f"Failed to parse {url}: {e}")
+
+                # Check if there's a next page
+                if f"page{page + 1}" not in html:
+                    break
+                page += 1
+
+            except Exception as e:
+                logging.error(f"Failed to scrape SS.lv page: {e}")
+                break
+
+        listings[district] = district_listings
+        logging.info(f"SS.lv full scan fetched {len(district_listings)} listings for {district}")
+
     return listings
 
 def fetch_city24_listings(districts, category, intent):
@@ -710,7 +767,7 @@ def get_feeds(category, intent):
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
 
-def process_user(user):
+def process_user(user, full_scan=False):
     chat_id = user["chat_id"]
     min_price = user.get("min_price", 0)
     max_price = user.get("max_price", 9999999)
@@ -724,7 +781,13 @@ def process_user(user):
     email = user.get("email", "")
 
     feeds = get_feeds(category, intent)
-    ss_listings = fetch_feeds(set(user_districts), feeds)
+
+    if full_scan:
+        logging.info(f"Full page scan for {chat_id}")
+        ss_listings = fetch_ss_full_page(set(user_districts), feeds)
+    else:
+        ss_listings = fetch_feeds(set(user_districts), feeds)
+
     city24_listings = fetch_city24_listings(user_districts, category, intent)
 
     seen = load_seen_for_user(chat_id)
@@ -741,9 +804,6 @@ def process_user(user):
             rooms = listing.get("rooms")
             area = listing.get("area")
             if price is None:
-                new_seen.add(item_id)
-                continue
-            if category == 'apartment' and rooms is None:
                 new_seen.add(item_id)
                 continue
             if user_rooms and rooms is not None and rooms not in user_rooms:
@@ -828,8 +888,8 @@ def run_for_user():
     if not result.data:
         return jsonify({"error": "user not found"}), 404
     user = result.data[0]
-    threading.Thread(target=process_user, args=(user,)).start()
-    logging.info(f"Triggered run for user {chat_id}")
+    threading.Thread(target=process_user, args=(user,), kwargs={"full_scan": True}).start()
+    logging.info(f"Triggered full scan for user {chat_id}")
     return jsonify({"success": True})
 
 @flask_app.route("/health", methods=["GET"])
