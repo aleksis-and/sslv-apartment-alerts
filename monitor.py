@@ -421,7 +421,6 @@ def build_email_html(matches, category, intent, district_names):
     category_lv = "dzīvokļi" if category == "apartment" else "mājas"
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = "🏢" if category == "apartment" else "🏡"
-
     items_html = ""
     for i, match in enumerate(matches, start=1):
         rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
@@ -432,7 +431,6 @@ def build_email_html(matches, category, intent, district_names):
         heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
         price = match.get('price')
         area = match.get('area')
-
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
             <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {heading}</p>
@@ -446,7 +444,6 @@ def build_email_html(matches, category, intent, district_names):
             <a href="{match['url']}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
         """
-
     return f"""
     <!DOCTYPE html>
     <html>
@@ -603,81 +600,8 @@ def fetch_feeds(districts, feeds_dict):
         listings[district] = district_listings
     return listings
 
-def parse_ss_search_page(html, district_name):
-    """Extract listing data directly from SS.lv search results table rows."""
-    district_listings = []
-
-    # Find all table rows with class d1 or d2 (listing rows)
-    row_pattern = re.compile(r'<tr[^>]+class="[^"]*\bd[12]\b[^"]*"[^>]*>(.*?)</tr>', re.DOTALL)
-    rows = row_pattern.findall(html)
-
-    for row_html in rows:
-        try:
-            # Extract URL
-            url_match = re.search(r'href="(/msg/lv/[^"]+\.html)"', row_html)
-            if not url_match:
-                continue
-            url = f"https://www.ss.lv{url_match.group(1)}"
-
-            # Extract all td cell text values
-            cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
-            cells_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
-
-            # SS.lv search results table columns (0-indexed):
-            # 0: checkbox, 1: image/description, 2: date, 3: street, 4: rooms, 5: area, 6: floor, 7: series, 8: price/m2, 9: price
-            if len(cells_text) < 9:
-                continue
-
-            street = cells_text[3] if len(cells_text) > 3 else None
-            rooms_raw = cells_text[4] if len(cells_text) > 4 else None
-            area_raw = cells_text[5] if len(cells_text) > 5 else None
-            price_raw = cells_text[9] if len(cells_text) > 9 else cells_text[-1]
-
-            # Parse rooms
-            rooms = int(rooms_raw.strip()) if rooms_raw and rooms_raw.strip().isdigit() else None
-
-            # Parse area - remove m² and spaces
-            area = None
-            if area_raw:
-                area_clean = re.sub(r'[^\d.,]', '', area_raw).replace(',', '.')
-                try:
-                    area = float(area_clean) if area_clean else None
-                except ValueError:
-                    area = None
-
-            # Parse price - remove all non-digits
-            price = None
-            if price_raw:
-                price_clean = re.sub(r'[^\d]', '', price_raw)
-                try:
-                    price = int(price_clean) if price_clean else None
-                except ValueError:
-                    price = None
-
-            if not url or price is None:
-                continue
-
-            district_listings.append({
-                "item_id": "ss_" + url,
-                "title": f"SS.lv — {street}, {district_name}",
-                "street": street,
-                "city_name": "",
-                "rooms": rooms,
-                "area": area,
-                "price": price,
-                "floor": None,
-                "url": url,
-                "source": "SS.lv",
-                "image_url": None,
-            })
-        except Exception as e:
-            logging.error(f"Failed to parse SS.lv row: {e}")
-            continue
-
-    return district_listings
-
 def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, max_price=None, min_area=None, max_area=None):
-    """Scrape SS.lv search pages with filters, extracting data from table rows directly."""
+    """Scrape SS.lv search pages with filters, visiting each listing page for full details."""
     listings = {}
     headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
 
@@ -687,9 +611,8 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
             continue
 
         base_url = feed_url.replace("/rss/", "/")
-        district_name = DISTRICT_NAMES.get(district, district)
 
-        # Build query params
+        # Build query params using SS.lv filter format
         params = []
         if min_price:
             params.append(f"topt[1][min]={min_price}")
@@ -719,12 +642,22 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                 response.raise_for_status()
                 html = response.text
 
-                page_listings = parse_ss_search_page(html, district_name)
+                # Extract listing URLs
+                links = re.findall(r'href="(/msg/lv/[^"]+\.html)"', html)
+                links = list(dict.fromkeys(links))  # deduplicate
 
-                if not page_listings:
+                if not links:
                     break
 
-                district_listings.extend(page_listings)
+                for path in links:
+                    url = f"https://www.ss.lv{path}"
+                    try:
+                        details = fetch_listing_details(url)
+                        details["item_id"] = "ss_" + url
+                        details["source"] = "SS.lv"
+                        district_listings.append(details)
+                    except Exception as e:
+                        logging.error(f"Failed to parse {url}: {e}")
 
                 if f"page{page + 1}.html" not in html:
                     break
