@@ -499,21 +499,16 @@ def fetch_listing_details(url):
     response.raise_for_status()
     html = response.text
 
-    # Extract image — try og:image first
     image_url = None
     og_image = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
     if not og_image:
         og_image = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
     if og_image:
         image_url = og_image.group(1).strip()
-
-    # SS.lv specific image pattern
     if not image_url:
         ss_image = re.search(r'src="(https://im\.ss\.lv/[^"]+\.(?:jpg|jpeg|png|webp))"', html, re.IGNORECASE)
         if ss_image:
             image_url = ss_image.group(1).strip()
-
-    # Fallback to any image
     if not image_url:
         any_image = re.search(r'<img[^>]+src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', html, re.IGNORECASE)
         if any_image:
@@ -608,8 +603,8 @@ def fetch_feeds(districts, feeds_dict):
         listings[district] = district_listings
     return listings
 
-def fetch_ss_full_page(districts, feeds_dict):
-    """Scrape full SS.lv search pages — used for initial scan on alert creation."""
+def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, max_price=None, min_area=None, max_area=None):
+    """Scrape full SS.lv search pages with filters — used for initial scan on alert creation."""
     listings = {}
     headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
 
@@ -619,23 +614,40 @@ def fetch_ss_full_page(districts, feeds_dict):
             continue
 
         # Convert RSS URL to search page URL
-        page_url = feed_url.replace("/rss/", "/")
+        base_url = feed_url.replace("/rss/", "/")
+
+        # Build query params using SS.lv filter format
+        params = []
+        if min_price:
+            params.append(f"topt[1][min]={min_price}")
+        if max_price:
+            params.append(f"topt[1][max]={max_price}")
+        if min_area:
+            params.append(f"topt[3][min]={min_area}")
+        if max_area:
+            params.append(f"topt[3][max]={max_area}")
+        if user_rooms:
+            for r in user_rooms:
+                params.append(f"topt[4][]={r}")
+
+        query_string = "&".join(params)
         district_listings = []
         page = 1
 
-        while page <= 3:  # scan up to 5 pages (~125 listings)
+        while page <= 5:
             try:
-                paginated_url = page_url if page == 1 else f"{page_url}page{page}.html"
+                if page == 1:
+                    paginated_url = f"{base_url}?{query_string}" if query_string else base_url
+                else:
+                    paginated_url = f"{base_url}page{page}.html?{query_string}" if query_string else f"{base_url}page{page}.html"
+
                 logging.info(f"Scraping SS.lv page: {paginated_url}")
                 response = requests.get(paginated_url, headers=headers, timeout=30)
                 response.raise_for_status()
                 html = response.text
 
                 # Extract listing URLs
-                links = re.findall(
-                    r'href="(/msg/lv/[^"]+\.html)"',
-                    html
-                )
+                links = re.findall(r'href="(/msg/lv/[^"]+\.html)"', html)
                 links = list(dict.fromkeys(links))  # deduplicate
 
                 if not links:
@@ -651,7 +663,6 @@ def fetch_ss_full_page(districts, feeds_dict):
                     except Exception as e:
                         logging.error(f"Failed to parse {url}: {e}")
 
-                # Check if there's a next page
                 if f"page{page + 1}.html" not in html:
                     break
                 page += 1
@@ -734,7 +745,6 @@ def fetch_city24_listings(districts, category, intent):
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
-                # Get image from City24 API
                 main_image = item.get("main_image")
                 image_url = None
                 if isinstance(main_image, dict):
@@ -784,7 +794,14 @@ def process_user(user, full_scan=False):
 
     if full_scan:
         logging.info(f"Full page scan for {chat_id}")
-        ss_listings = fetch_ss_full_page(set(user_districts), feeds)
+        ss_listings = fetch_ss_full_page(
+            set(user_districts), feeds,
+            user_rooms=user_rooms,
+            min_price=min_price,
+            max_price=max_price,
+            min_area=min_area,
+            max_area=max_area,
+        )
     else:
         ss_listings = fetch_feeds(set(user_districts), feeds)
 
