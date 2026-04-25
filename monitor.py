@@ -12,10 +12,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 flask_app = Flask(__name__)
 
@@ -363,11 +365,62 @@ def send_email_message(to_email, subject, html_content):
     except Exception as e:
         logging.error(f"Email error: {e}")
 
+def send_push_notification(push_token, title, body):
+    if not push_token:
+        return
+    try:
+        response = requests.post(
+            "https://exp.host/--/api/v2/push/send",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            json={
+                "to": push_token,
+                "title": title,
+                "body": body,
+                "sound": "default",
+                "data": {}
+            },
+            timeout=30
+        )
+        logging.info(f"Push sent: {response.status_code} {response.text}")
+    except Exception as e:
+        logging.error(f"Push error: {e}")
+
+def save_listings_to_db(user, matches, district_names):
+    global supabase_admin
+    user_id = user.get("id")
+    auth_user_id = user.get("auth_user_id")
+    if not user_id:
+        return
+    rows = []
+    for match in matches:
+        rows.append({
+            "user_id": user_id,
+            "auth_user_id": auth_user_id,
+            "title": match.get("title", ""),
+            "price": match.get("price"),
+            "rooms": match.get("rooms"),
+            "area": match.get("area"),
+            "district": district_names,
+            "url": match.get("url", ""),
+            "image_url": match.get("image_url"),
+            "source": match.get("source", "SS.lv"),
+            "seen": False,
+            "saved": False,
+        })
+    if rows:
+        try:
+            supabase_admin.table("listings").insert(rows).execute()
+            logging.info(f"Saved {len(rows)} listings to DB for user {user_id}")
+        except Exception as e:
+            logging.error(f"Failed to save listings to DB: {e}")
+
 def build_email_html(matches, category, intent, district_names):
     category_lv = "dzīvokļi" if category == "apartment" else "mājas"
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = "🏢" if category == "apartment" else "🏡"
-
     items_html = ""
     for i, match in enumerate(matches, start=1):
         rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
@@ -378,7 +431,6 @@ def build_email_html(matches, category, intent, district_names):
         heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
         price = match.get('price')
         area = match.get('area')
-
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
             <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {heading}</p>
@@ -392,7 +444,6 @@ def build_email_html(matches, category, intent, district_names):
             <a href="{match['url']}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
         """
-
     return f"""
     <!DOCTYPE html>
     <html>
@@ -444,6 +495,24 @@ def fetch_listing_details(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
+
+    image_url = None
+    og_image = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if not og_image:
+        og_image = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
+    if og_image:
+        image_url = og_image.group(1).strip()
+    if not image_url:
+        ss_image = re.search(r'src="(https://im\.ss\.lv/[^"]+\.(?:jpg|jpeg|png|webp))"', html, re.IGNORECASE)
+        if ss_image:
+            image_url = ss_image.group(1).strip()
+    if not image_url:
+        any_image = re.search(r'<img[^>]+src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', html, re.IGNORECASE)
+        if any_image:
+            candidate = any_image.group(1).strip()
+            if candidate.startswith('http'):
+                image_url = candidate
+
     title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else url
     text = re.sub(r"<[^>]+>", " ", html)
@@ -463,12 +532,13 @@ def fetch_listing_details(url):
             "1-istabu": "1", "2-istabu": "2", "3-istabu": "3",
             "4-istabu": "4", "5-istabu": "5", "6-istabu": "6",
         }
+        search_text = (title + " " + text).lower()
         for word, num in word_to_num.items():
-            if word in title.lower():
+            if word in search_text:
                 rooms_raw = num
                 break
         if not rooms_raw:
-            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', title, re.IGNORECASE)
+            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', search_text, re.IGNORECASE)
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
     if not price_raw:
@@ -484,6 +554,7 @@ def fetch_listing_details(url):
         "street": street_raw,
         "city_name": "",
         "url": url,
+        "image_url": image_url,
     }
 
 def format_price(price):
@@ -527,6 +598,78 @@ def fetch_feeds(districts, feeds_dict):
             except Exception as e:
                 logging.error(f"Failed to parse {link}: {e}")
         listings[district] = district_listings
+    return listings
+
+def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, max_price=None, min_area=None, max_area=None):
+    """Scrape SS.lv search pages with filters, visiting each listing page for full details."""
+    listings = {}
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
+
+    for district in districts:
+        feed_url = feeds_dict.get(district)
+        if not feed_url:
+            continue
+
+        base_url = feed_url.replace("/rss/", "/")
+
+        # Build query params using SS.lv filter format
+        params = []
+        if min_price:
+            params.append(f"topt[1][min]={min_price}")
+        if max_price:
+            params.append(f"topt[1][max]={max_price}")
+        if min_area:
+            params.append(f"topt[3][min]={min_area}")
+        if max_area:
+            params.append(f"topt[3][max]={max_area}")
+        if user_rooms:
+            for r in user_rooms:
+                params.append(f"topt[4][]={r}")
+
+        query_string = "&".join(params)
+        district_listings = []
+        page = 1
+
+        while page <= 5:
+            try:
+                if page == 1:
+                    paginated_url = f"{base_url}?{query_string}" if query_string else base_url
+                else:
+                    paginated_url = f"{base_url}page{page}.html?{query_string}" if query_string else f"{base_url}page{page}.html"
+
+                logging.info(f"Scraping SS.lv page: {paginated_url}")
+                response = requests.get(paginated_url, headers=headers, timeout=30)
+                response.raise_for_status()
+                html = response.text
+
+                # Extract listing URLs
+                links = re.findall(r'href="(/msg/lv/[^"]+\.html)"', html)
+                links = list(dict.fromkeys(links))  # deduplicate
+
+                if not links:
+                    break
+
+                for path in links:
+                    url = f"https://www.ss.lv{path}"
+                    try:
+                        details = fetch_listing_details(url)
+                        details["item_id"] = "ss_" + url
+                        details["source"] = "SS.lv"
+                        district_listings.append(details)
+                    except Exception as e:
+                        logging.error(f"Failed to parse {url}: {e}")
+
+                if f"page{page + 1}.html" not in html:
+                    break
+                page += 1
+
+            except Exception as e:
+                logging.error(f"Failed to scrape SS.lv page: {e}")
+                break
+
+        listings[district] = district_listings
+        logging.info(f"SS.lv full scan fetched {len(district_listings)} listings for {district}")
+
     return listings
 
 def fetch_city24_listings(districts, category, intent):
@@ -598,6 +741,13 @@ def fetch_city24_listings(districts, category, intent):
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
+                main_image = item.get("main_image")
+                image_url = None
+                if isinstance(main_image, dict):
+                    raw_url = main_image.get("url") or main_image.get("large_url")
+                    if raw_url:
+                        image_url = raw_url.replace("{fmt:em}", "24")
+
                 district_listings.append({
                     "item_id": item_id,
                     "title": f"City24.lv — {full_address}, {city_name_raw}",
@@ -609,6 +759,7 @@ def fetch_city24_listings(districts, category, intent):
                     "street": full_address,
                     "url": listing_url,
                     "source": "City24.lv",
+                    "image_url": image_url,
                 })
             all_listings[district] = district_listings
             logging.info(f"City24 fetched {len(district_listings)} listings for {district}")
@@ -622,7 +773,7 @@ def get_feeds(category, intent):
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
 
-def process_user(user):
+def process_user(user, full_scan=False):
     chat_id = user["chat_id"]
     min_price = user.get("min_price", 0)
     max_price = user.get("max_price", 9999999)
@@ -636,7 +787,20 @@ def process_user(user):
     email = user.get("email", "")
 
     feeds = get_feeds(category, intent)
-    ss_listings = fetch_feeds(set(user_districts), feeds)
+
+    if full_scan:
+        logging.info(f"Full page scan for {chat_id}")
+        ss_listings = fetch_ss_full_page(
+            set(user_districts), feeds,
+            user_rooms=user_rooms,
+            min_price=min_price,
+            max_price=max_price,
+            min_area=min_area,
+            max_area=max_area,
+        )
+    else:
+        ss_listings = fetch_feeds(set(user_districts), feeds)
+
     city24_listings = fetch_city24_listings(user_districts, category, intent)
 
     seen = load_seen_for_user(chat_id)
@@ -653,9 +817,6 @@ def process_user(user):
             rooms = listing.get("rooms")
             area = listing.get("area")
             if price is None:
-                new_seen.add(item_id)
-                continue
-            if category == 'apartment' and rooms is None:
                 new_seen.add(item_id)
                 continue
             if user_rooms and rooms is not None and rooms not in user_rooms:
@@ -680,6 +841,16 @@ def process_user(user):
             subject = f"Jauni {category_lv} {intent_lv} — {district_names}"
             html = build_email_html(matches, category, intent, district_names)
             send_email_message(email, subject, html)
+
+        elif channel == "push":
+            push_token = user.get("push_token")
+            save_listings_to_db(user, matches, district_names)
+            send_push_notification(
+                push_token,
+                f"{len(matches)} jauni sludinājumi",
+                f"{matches[0].get('street') or category_lv} — {format_price(matches[0].get('price'))}"
+            )
+
         else:
             message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
             message += f"📍 {district_names}\n\n"
@@ -702,6 +873,7 @@ def process_user(user):
                     f"• [Skatīt sludinājumu]({match['url']})\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
+
         logging.info(f"Sent {len(matches)} matches to {chat_id} via {channel}")
     else:
         logging.info(f"No matches for {chat_id}")
@@ -729,8 +901,8 @@ def run_for_user():
     if not result.data:
         return jsonify({"error": "user not found"}), 404
     user = result.data[0]
-    threading.Thread(target=process_user, args=(user,)).start()
-    logging.info(f"Triggered run for user {chat_id}")
+    threading.Thread(target=process_user, args=(user,), kwargs={"full_scan": True}).start()
+    logging.info(f"Triggered full scan for user {chat_id}")
     return jsonify({"success": True})
 
 @flask_app.route("/health", methods=["GET"])
