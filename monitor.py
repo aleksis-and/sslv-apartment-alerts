@@ -533,22 +533,22 @@ def fetch_listing_details(url):
     street_raw = extract_field(text, "street")
     if street_raw:
         street_raw = re.sub(r'\s*\[?\s*Karte\s*\]?\s*$', '', street_raw).strip()
-   if not rooms_raw:
-    word_to_num = {
-        "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
-        "četristabu": "4", "piecīstabu": "5", "sešistabu": "6",
-        "1-istabu": "1", "2-istabu": "2", "3-istabu": "3",
-        "4-istabu": "4", "5-istabu": "5", "6-istabu": "6",
-    }
-    search_text = (title + " " + text).lower()
-    for word, num in word_to_num.items():
-        if word in search_text:
-            rooms_raw = num
-            break
     if not rooms_raw:
-        title_rooms = re.search(r'(\d+)\s*-?\s*istabu', search_text, re.IGNORECASE)
-        if title_rooms:
-            rooms_raw = title_rooms.group(1)
+        word_to_num = {
+            "vienistabu": "1", "divistabu": "2", "trīsistabu": "3",
+            "četristabu": "4", "piecīstabu": "5", "sešistabu": "6",
+            "1-istabu": "1", "2-istabu": "2", "3-istabu": "3",
+            "4-istabu": "4", "5-istabu": "5", "6-istabu": "6",
+        }
+        search_text = (title + " " + text).lower()
+        for word, num in word_to_num.items():
+            if word in title.lower():
+                rooms_raw = num
+                break
+        if not rooms_raw:
+            title_rooms = re.search(r'(\d+)\s*-?\s*istabu', title, re.IGNORECASE)
+            if title_rooms:
+                rooms_raw = title_rooms.group(1)
     if not price_raw:
         title_price = re.search(r'(\d[\d\s]*)\s*€', title)
         if title_price:
