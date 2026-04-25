@@ -2,6 +2,7 @@ import re
 import os
 import logging
 import threading
+from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from supabase import create_client
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -15,8 +16,13 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
-RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "false").lower() in ("1", "true", "yes", "on")
+RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "true").lower() in ("1", "true", "yes", "on")
 RUN_FOR_USER_API_KEY = os.environ.get("RUN_FOR_USER_API_KEY")
+try:
+    SS_FULL_SCAN_MAX_PAGES = int(os.environ.get("SS_FULL_SCAN_MAX_PAGES", "20"))
+except ValueError:
+    logging.warning("Invalid SS_FULL_SCAN_MAX_PAGES; using 20")
+    SS_FULL_SCAN_MAX_PAGES = 20
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -537,6 +543,13 @@ def format_query_value(value):
         return str(int(value))
     return str(value)
 
+def first_dict(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+    return {}
+
 def extract_field(text, label):
     patterns = {
         "rooms": [r"Istabas:\s*(\d+)"],
@@ -677,26 +690,26 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
 
         base_url = feed_url.replace("/rss/", "/")
 
-        # Build query params using SS.lv filter format
+        # SS.lv still gets locally filtered below; these params reduce page volume when accepted.
         params = []
         if min_price:
-            params.append(f"topt[1][min]={format_query_value(min_price)}")
+            params.append(("topt[8][min]", format_query_value(min_price)))
         if max_price:
-            params.append(f"topt[1][max]={format_query_value(max_price)}")
+            params.append(("topt[8][max]", format_query_value(max_price)))
         if min_area:
-            params.append(f"topt[3][min]={format_query_value(min_area)}")
+            params.append(("topt[3][min]", format_query_value(min_area)))
         if max_area:
-            params.append(f"topt[3][max]={format_query_value(max_area)}")
+            params.append(("topt[3][max]", format_query_value(max_area)))
         if user_rooms:
-            for r in user_rooms:
-                params.append(f"topt[4][]={r}")
+            params.append(("topt[1][min]", min(user_rooms)))
+            params.append(("topt[1][max]", max(user_rooms)))
 
-        query_string = "&".join(params)
+        query_string = urlencode(params)
         district_listings = []
         district_seen_paths = set()
         page = 1
 
-        while page <= 5:
+        while page <= SS_FULL_SCAN_MAX_PAGES:
             try:
                 if page == 1:
                     paginated_url = f"{base_url}?{query_string}" if query_string else base_url
@@ -732,6 +745,9 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
             except Exception as e:
                 logging.error(f"Failed to scrape SS.lv page: {e}")
                 break
+
+        if page > SS_FULL_SCAN_MAX_PAGES:
+            logging.info(f"Stopped SS.lv full scan for {district} after {SS_FULL_SCAN_MAX_PAGES} pages")
 
         listings[district] = district_listings
         logging.info(f"SS.lv full scan fetched {len(district_listings)} listings for {district}")
@@ -771,21 +787,29 @@ def fetch_city24_listings(districts, category, intent):
             response = requests.get(url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
+            if isinstance(data, dict):
+                data = data.get("items") or data.get("data") or data.get("results") or []
+            if not isinstance(data, list):
+                logging.error(f"City24 returned unexpected payload for {district}: {type(data).__name__}")
+                continue
 
             district_listings = []
             for item in data:
+                if not isinstance(item, dict):
+                    logging.info(f"Skipping City24 non-object item for {district}: {type(item).__name__}")
+                    continue
                 item_id = "city24_" + str(item.get("id", ""))
                 friendly_id = item.get("friendly_id", "")
                 price_raw = item.get("price")
                 rooms = item.get("room_count")
                 area = item.get("property_size")
-                addr = item.get("address", {})
+                addr = first_dict(item.get("address"))
                 street_name_raw = addr.get("street_name", "")
                 house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
                 apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
                 city_name_raw = addr.get("city_name", "")
                 county_name_raw = addr.get("county_name") or city_name_raw
-                attrs = item.get("attributes", {})
+                attrs = first_dict(item.get("attributes"))
                 floor = attrs.get("FLOOR")
                 total_floors = attrs.get("TOTAL_FLOORS")
                 floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
@@ -807,12 +831,11 @@ def fetch_city24_listings(districts, category, intent):
                 address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
                 listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
-                main_image = item.get("main_image")
+                main_image = first_dict(item.get("main_image"))
                 image_url = None
-                if isinstance(main_image, dict):
-                    raw_url = main_image.get("url") or main_image.get("large_url")
-                    if raw_url:
-                        image_url = raw_url.replace("{fmt:em}", "24")
+                raw_url = main_image.get("url") or main_image.get("large_url")
+                if raw_url:
+                    image_url = raw_url.replace("{fmt:em}", "24")
 
                 district_listings.append({
                     "item_id": item_id,
