@@ -348,14 +348,14 @@ def slugify(text):
     return text
 
 def load_seen_for_user(chat_id):
-    result = supabase.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
+    result = supabase_admin.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
     return set(row["id"] for row in result.data)
 
 def save_seen_for_user(chat_id, new_ids):
     if not new_ids:
         return
     rows = [{"id": id, "chat_id": chat_id} for id in new_ids]
-    supabase.table("seen_listings").upsert(rows).execute()
+    supabase_admin.table("seen_listings").upsert(rows).execute()
 
 def clean_text(value):
     if value is None:
@@ -1089,7 +1089,7 @@ def process_user(user, full_scan=False):
 
 def run():
     logging.info("Starting monitor run...")
-    result = supabase.table("users").select("*").eq("active", True).execute()
+    result = supabase_admin.table("users").select("*").eq("active", True).execute()
     users = result.data
     logging.info(f"Found {len(users)} active users")
     if not users:
@@ -1113,7 +1113,7 @@ def run_for_user():
         return jsonify({"error": reason}), status_code
 
     try:
-        result = supabase.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+        result = supabase_admin.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
     except Exception as e:
         release_manual_scan(chat_id)
         logging.error(f"Manual scan user lookup failed for {chat_id}: {e}")
