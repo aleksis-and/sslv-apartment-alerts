@@ -1,7 +1,11 @@
 import re
 import os
+import html
+import hmac
 import logging
 import threading
+import time
+from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from supabase import create_client
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -12,14 +16,50 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
+RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "false").lower() in ("1", "true", "yes", "on")
+RUN_FOR_USER_API_KEY = os.environ.get("RUN_FOR_USER_API_KEY")
+try:
+    SS_FULL_SCAN_MAX_PAGES = int(os.environ.get("SS_FULL_SCAN_MAX_PAGES", "20"))
+except ValueError:
+    logging.warning("Invalid SS_FULL_SCAN_MAX_PAGES; using 20")
+    SS_FULL_SCAN_MAX_PAGES = 20
+try:
+    MANUAL_SCAN_COOLDOWN_SECONDS = max(0, int(os.environ.get("MANUAL_SCAN_COOLDOWN_SECONDS", "300")))
+except ValueError:
+    logging.warning("Invalid MANUAL_SCAN_COOLDOWN_SECONDS; using 300")
+    MANUAL_SCAN_COOLDOWN_SECONDS = 300
+try:
+    SCAN_MAX_CONCURRENCY = max(1, int(os.environ.get("SCAN_MAX_CONCURRENCY", "2")))
+except ValueError:
+    logging.warning("Invalid SCAN_MAX_CONCURRENCY; using 2")
+    SCAN_MAX_CONCURRENCY = 2
+try:
+    CITY24_LATEST_MAX_PAGES = max(1, int(os.environ.get("CITY24_LATEST_MAX_PAGES", "1")))
+except ValueError:
+    logging.warning("Invalid CITY24_LATEST_MAX_PAGES; using 1")
+    CITY24_LATEST_MAX_PAGES = 1
+try:
+    SOURCE_FETCH_DELAY_SECONDS = max(0.0, float(os.environ.get("SOURCE_FETCH_DELAY_SECONDS", "0.1")))
+except ValueError:
+    logging.warning("Invalid SOURCE_FETCH_DELAY_SECONDS; using 0.1")
+    SOURCE_FETCH_DELAY_SECONDS = 0.1
+
+if not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_KEY is required for backend admin operations")
+if SUPABASE_SERVICE_KEY == SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_KEY must be a dedicated service-role key, not SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 flask_app = Flask(__name__)
+scan_semaphore = threading.BoundedSemaphore(SCAN_MAX_CONCURRENCY)
+manual_scan_lock = threading.Lock()
+manual_scans_running = set()
+manual_scan_last_started = {}
 
 CITY24_DISTRICT_MAP = {
     "centrs":                   {"city": 245396, "district": 270700},
@@ -324,21 +364,37 @@ def slugify(text):
     return text
 
 def load_seen_for_user(chat_id):
-    result = supabase.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
+    result = supabase_admin.table("seen_listings").select("id").eq("chat_id", chat_id).execute()
     return set(row["id"] for row in result.data)
 
 def save_seen_for_user(chat_id, new_ids):
     if not new_ids:
         return
     rows = [{"id": id, "chat_id": chat_id} for id in new_ids]
-    supabase.table("seen_listings").upsert(rows).execute()
+    supabase_admin.table("seen_listings").upsert(rows).execute()
+
+def clean_text(value):
+    if value is None:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+def escape_html(value):
+    return html.escape(clean_text(value), quote=True)
+
+def pause_after_source_request():
+    if SOURCE_FETCH_DELAY_SECONDS > 0:
+        time.sleep(SOURCE_FETCH_DELAY_SECONDS)
+
+def source_get(*args, **kwargs):
+    response = requests.get(*args, **kwargs)
+    pause_after_source_request()
+    return response
 
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }, timeout=30)
 
@@ -352,8 +408,8 @@ def send_email_message(to_email, subject, html_content):
             },
             json={
                 "from": "Paziņojumi <no-reply@pazinojumi.lv>",
-                "to": [to_email],
-                "subject": subject,
+                "to": [clean_text(to_email)],
+                "subject": clean_text(subject),
                 "html": html_content
             },
             timeout=30
@@ -422,26 +478,31 @@ def build_email_html(matches, category, intent, district_names):
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = "🏢" if category == "apartment" else "🏡"
     items_html = ""
+    safe_district_names = escape_html(district_names)
     for i, match in enumerate(matches, start=1):
-        rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+        rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
         source = match.get('source', 'SS.lv')
-        source_badge = "City24" if source == "City24.lv" else "SS.lv"
-        address = match.get('street') or 'Nav'
-        city_name = match.get('city_name', '') if source == "City24.lv" else ""
+        source_badge = "City24" if source == "City24.lv" else clean_text(source or "SS.lv")
+        address = clean_text(match.get('street') or 'Nav')
+        city_name = clean_text(match.get('city_name', '')) if source == "City24.lv" else ""
         heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
         price = match.get('price')
         area = match.get('area')
+        safe_heading = escape_html(heading)
+        safe_rooms = escape_html(rooms_str)
+        safe_floor = escape_html(match.get('floor') or 'Nav')
+        safe_url = escape_html(match.get('url') or '#')
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
-            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {heading}</p>
+            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {safe_heading}</p>
             <table style="width:100%;border-collapse:collapse;">
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;width:100px;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;">{format_price(price)}</td></tr>
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;">{format_price_per_sqm(price, area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{rooms_str}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{safe_rooms}</td></tr>
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;">{format_area(area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{match['floor'] or 'Nav'}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{safe_floor}</td></tr>
             </table>
-            <a href="{match['url']}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
+            <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
         """
     return f"""
@@ -452,7 +513,7 @@ def build_email_html(matches, category, intent, district_names):
         <div style="max-width:560px;margin:0 auto;">
             <div style="text-align:center;margin-bottom:24px;">
                 <h1 style="font-size:22px;font-weight:700;color:#1a1a1a;margin:0;">Jauni {category_lv} {intent_lv}</h1>
-                <p style="color:#888;font-size:14px;margin-top:6px;">📍 {district_names}</p>
+                <p style="color:#888;font-size:14px;margin-top:6px;">📍 {safe_district_names}</p>
             </div>
             {items_html}
             <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #f0ece4;">
@@ -466,11 +527,81 @@ def build_email_html(matches, category, intent, district_names):
 def normalize_int(value):
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
     value = str(value).replace(" ", "").replace(",", "").replace(".", "")
     try:
         return int(value)
     except ValueError:
         return None
+
+def normalize_float(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    value = str(value).replace(" ", "").replace(",", ".")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def normalize_filter_int(value, default):
+    normalized = normalize_int(value)
+    return default if normalized is None else normalized
+
+def normalize_filter_float(value, default):
+    normalized = normalize_float(value)
+    return default if normalized is None else normalized
+
+def normalize_room_value(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    value = str(value).strip()
+    if not value:
+        return None
+    try:
+        parsed = float(value.replace(",", "."))
+    except ValueError:
+        return None
+    return int(parsed) if parsed.is_integer() else None
+
+def normalize_room_filters(rooms):
+    if not rooms:
+        return []
+    if isinstance(rooms, str):
+        rooms = rooms.strip().strip("[]{}")
+        rooms = [part.strip().strip('"\'') for part in rooms.split(",")]
+    elif not isinstance(rooms, (list, tuple, set)):
+        rooms = [rooms]
+    normalized = []
+    for room in rooms:
+        room_value = normalize_room_value(room)
+        if room_value is not None:
+            normalized.append(room_value)
+    return sorted(set(normalized))
+
+def format_query_value(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+def first_dict(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+    return {}
 
 def extract_field(text, label):
     patterns = {
@@ -492,7 +623,7 @@ def extract_field(text, label):
 
 def fetch_listing_details(url):
     headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
-    response = requests.get(url, headers=headers, timeout=30)
+    response = source_get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
 
@@ -584,6 +715,7 @@ def fetch_feeds(districts, feeds_dict):
             continue
         logging.info(f"Checking SS.lv feed: {feed_url}")
         feed = feedparser.parse(feed_url)
+        pause_after_source_request()
         district_listings = []
         for entry in feed.entries:
             item_id = entry.get("id") or entry.get("link") or entry.get("title")
@@ -612,25 +744,26 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
 
         base_url = feed_url.replace("/rss/", "/")
 
-        # Build query params using SS.lv filter format
+        # SS.lv still gets locally filtered below; these params reduce page volume when accepted.
         params = []
         if min_price:
-            params.append(f"topt[1][min]={min_price}")
+            params.append(("topt[8][min]", format_query_value(min_price)))
         if max_price:
-            params.append(f"topt[1][max]={max_price}")
+            params.append(("topt[8][max]", format_query_value(max_price)))
         if min_area:
-            params.append(f"topt[3][min]={min_area}")
+            params.append(("topt[3][min]", format_query_value(min_area)))
         if max_area:
-            params.append(f"topt[3][max]={max_area}")
+            params.append(("topt[3][max]", format_query_value(max_area)))
         if user_rooms:
-            for r in user_rooms:
-                params.append(f"topt[4][]={r}")
+            params.append(("topt[1][min]", min(user_rooms)))
+            params.append(("topt[1][max]", max(user_rooms)))
 
-        query_string = "&".join(params)
+        query_string = urlencode(params)
         district_listings = []
+        district_seen_paths = set()
         page = 1
 
-        while page <= 5:
+        while page <= SS_FULL_SCAN_MAX_PAGES:
             try:
                 if page == 1:
                     paginated_url = f"{base_url}?{query_string}" if query_string else base_url
@@ -638,18 +771,20 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                     paginated_url = f"{base_url}page{page}.html?{query_string}" if query_string else f"{base_url}page{page}.html"
 
                 logging.info(f"Scraping SS.lv page: {paginated_url}")
-                response = requests.get(paginated_url, headers=headers, timeout=30)
+                response = source_get(paginated_url, headers=headers, timeout=30)
                 response.raise_for_status()
                 html = response.text
 
                 # Extract listing URLs
                 links = re.findall(r'href="(/msg/lv/[^"]+\.html)"', html)
                 links = list(dict.fromkeys(links))  # deduplicate
+                new_links = [path for path in links if path not in district_seen_paths]
 
-                if not links:
+                if not new_links:
                     break
+                district_seen_paths.update(new_links)
 
-                for path in links:
+                for path in new_links:
                     url = f"https://www.ss.lv{path}"
                     try:
                         details = fetch_listing_details(url)
@@ -659,20 +794,21 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                     except Exception as e:
                         logging.error(f"Failed to parse {url}: {e}")
 
-                if f"page{page + 1}.html" not in html:
-                    break
                 page += 1
 
             except Exception as e:
                 logging.error(f"Failed to scrape SS.lv page: {e}")
                 break
 
+        if page > SS_FULL_SCAN_MAX_PAGES:
+            logging.info(f"Stopped SS.lv full scan for {district} after {SS_FULL_SCAN_MAX_PAGES} pages")
+
         listings[district] = district_listings
         logging.info(f"SS.lv full scan fetched {len(district_listings)} listings for {district}")
 
     return listings
 
-def fetch_city24_listings(districts, category, intent):
+def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_MAX_PAGES):
     unit_type = "Apartment" if category == "apartment" else "House"
     ts_type = "sale" if intent == "buy" else "rent"
     listing_type = "apartments" if category == "apartment" else "houses"
@@ -687,80 +823,97 @@ def fetch_city24_listings(districts, category, intent):
         city_id = mapping["city"]
         district_id = mapping.get("district")
 
-        params = {
-            "address[cc]": 2,
-            "address[city][]": city_id,
-            "tsType": ts_type,
-            "unitType": unit_type,
-            "adReach": 1,
-            "itemsPerPage": 50,
-            "page": 1,
-        }
-        if district_id:
-            params["address[district][]"] = district_id
+        district_listings = []
+        seen_item_ids = set()
 
         try:
             url = "https://api.city24.lv/lv_LV/search/realties"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            for page in range(1, max_pages + 1):
+                params = {
+                    "address[cc]": 2,
+                    "address[city][]": city_id,
+                    "tsType": ts_type,
+                    "unitType": unit_type,
+                    "adReach": 1,
+                    "itemsPerPage": 50,
+                    "page": page,
+                }
+                if district_id:
+                    params["address[district][]"] = district_id
 
-            district_listings = []
-            for item in data:
-                item_id = "city24_" + str(item.get("id", ""))
-                friendly_id = item.get("friendly_id", "")
-                price_raw = item.get("price")
-                rooms = item.get("room_count")
-                area = item.get("property_size")
-                addr = item.get("address", {})
-                street_name_raw = addr.get("street_name", "")
-                house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
-                apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
-                city_name_raw = addr.get("city_name", "")
-                county_name_raw = addr.get("county_name") or city_name_raw
-                attrs = item.get("attributes", {})
-                floor = attrs.get("FLOOR")
-                total_floors = attrs.get("TOTAL_FLOORS")
-                floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
+                response = source_get(url, params=params, headers=headers, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, dict):
+                    data = data.get("items") or data.get("data") or data.get("results") or []
+                if not isinstance(data, list):
+                    logging.error(f"City24 returned unexpected payload for {district}: {type(data).__name__}")
+                    break
+                if not data:
+                    break
 
-                full_address = street_name_raw
-                if house_number:
-                    full_address += f" {house_number}"
-                if apartment_number:
-                    full_address += f"-{apartment_number}"
+                for item in data:
+                    if not isinstance(item, dict):
+                        logging.info(f"Skipping City24 non-object item for {district}: {type(item).__name__}")
+                        continue
+                    item_id = "city24_" + str(item.get("id", ""))
+                    if item_id in seen_item_ids:
+                        continue
+                    seen_item_ids.add(item_id)
+                    friendly_id = item.get("friendly_id", "")
+                    price_raw = item.get("price")
+                    rooms = item.get("room_count")
+                    area = item.get("property_size")
+                    addr = first_dict(item.get("address"))
+                    street_name_raw = addr.get("street_name", "")
+                    house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
+                    apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
+                    city_name_raw = addr.get("city_name", "")
+                    county_name_raw = addr.get("county_name") or city_name_raw
+                    attrs = first_dict(item.get("attributes"))
+                    floor = attrs.get("FLOOR")
+                    total_floors = attrs.get("TOTAL_FLOORS")
+                    floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
 
-                county_slug = slugify(county_name_raw)
-                city_slug = slugify(city_name_raw)
-                street_slug = slugify(street_name_raw)
-                parts = [county_slug]
-                if city_slug and city_slug != county_slug:
-                    parts.append(city_slug)
-                if street_slug:
-                    parts.append(street_slug)
-                address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
-                listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
+                    full_address = street_name_raw
+                    if house_number:
+                        full_address += f" {house_number}"
+                    if apartment_number:
+                        full_address += f"-{apartment_number}"
 
-                main_image = item.get("main_image")
-                image_url = None
-                if isinstance(main_image, dict):
+                    county_slug = slugify(county_name_raw)
+                    city_slug = slugify(city_name_raw)
+                    street_slug = slugify(street_name_raw)
+                    parts = [county_slug]
+                    if city_slug and city_slug != county_slug:
+                        parts.append(city_slug)
+                    if street_slug:
+                        parts.append(street_slug)
+                    address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
+                    listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
+
+                    main_image = first_dict(item.get("main_image"))
+                    image_url = None
                     raw_url = main_image.get("url") or main_image.get("large_url")
                     if raw_url:
                         image_url = raw_url.replace("{fmt:em}", "24")
 
-                district_listings.append({
-                    "item_id": item_id,
-                    "title": f"City24.lv — {full_address}, {city_name_raw}",
-                    "city_name": city_name_raw,
-                    "rooms": rooms,
-                    "area": float(area) if area else None,
-                    "price": int(float(price_raw)) if price_raw else None,
-                    "floor": floor_str,
-                    "street": full_address,
-                    "url": listing_url,
-                    "source": "City24.lv",
-                    "image_url": image_url,
-                })
+                    district_listings.append({
+                        "item_id": item_id,
+                        "title": f"City24.lv — {full_address}, {city_name_raw}",
+                        "city_name": city_name_raw,
+                        "rooms": rooms,
+                        "area": float(area) if area else None,
+                        "price": int(float(price_raw)) if price_raw else None,
+                        "floor": floor_str,
+                        "street": full_address,
+                        "url": listing_url,
+                        "source": "City24.lv",
+                        "image_url": image_url,
+                    })
+                if len(data) < 50:
+                    break
             all_listings[district] = district_listings
             logging.info(f"City24 fetched {len(district_listings)} listings for {district}")
         except Exception as e:
@@ -773,61 +926,236 @@ def get_feeds(category, intent):
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
 
-def process_user(user, full_scan=False):
+def normalize_district_filters(districts):
+    if not districts:
+        return []
+    if isinstance(districts, str):
+        districts = districts.strip().strip("[]{}")
+        districts = [part.strip().strip('"\'') for part in districts.split(",")]
+    elif not isinstance(districts, (list, tuple, set)):
+        districts = [districts]
+    return [str(district).strip() for district in districts if str(district).strip()]
+
+def fetch_ss_latest_for_district(category, intent, district):
+    feeds = get_feeds(category, intent)
+    return fetch_feeds([district], feeds).get(district, [])
+
+def fetch_city24_latest_for_district(category, intent, district):
+    return fetch_city24_listings([district], category, intent, max_pages=CITY24_LATEST_MAX_PAGES).get(district, [])
+
+def build_latest_fetch_keys(users):
+    keys = set()
+    for user in users:
+        category = user.get("category", "apartment")
+        intent = user.get("intent", "buy")
+        for district in normalize_district_filters(user.get("districts", [])):
+            keys.add((category, intent, district))
+    return sorted(keys)
+
+def fetch_shared_latest_listings(users):
+    cache = {}
+    keys = build_latest_fetch_keys(users)
+    started = time.monotonic()
+    logging.info(f"Fetching shared latest listings for {len(keys)} category/intent/district groups")
+
+    for category, intent, district in keys:
+        ss_key = ("ss", category, intent, district)
+        city24_key = ("city24", category, intent, district)
+
+        try:
+            cache[ss_key] = fetch_ss_latest_for_district(category, intent, district)
+        except Exception as e:
+            logging.error(f"Shared SS.lv fetch failed for {category}/{intent}/{district}: {e}")
+            cache[ss_key] = []
+
+        try:
+            cache[city24_key] = fetch_city24_latest_for_district(category, intent, district)
+        except Exception as e:
+            logging.error(f"Shared City24 fetch failed for {category}/{intent}/{district}: {e}")
+            cache[city24_key] = []
+
+        logging.info(
+            f"Shared fetch {category}/{intent}/{district}: "
+            f"ss={len(cache[ss_key])}, city24={len(cache[city24_key])}"
+        )
+
+    elapsed = time.monotonic() - started
+    listing_count = sum(len(listings) for listings in cache.values())
+    logging.info(f"Shared latest fetch complete in {elapsed:.1f}s with {listing_count} raw listings")
+    return cache
+
+def listings_for_user_from_cache(user, cache):
+    category = user.get("category", "apartment")
+    intent = user.get("intent", "buy")
+    listings_by_district = {}
+    for district in normalize_district_filters(user.get("districts", [])):
+        listings_by_district[district] = (
+            list(cache.get(("ss", category, intent, district), []))
+            + list(cache.get(("city24", category, intent, district), []))
+        )
+    return listings_by_district
+
+def merge_listings_by_district(districts, *source_maps):
+    merged = {}
+    for district in districts:
+        combined = []
+        for source_map in source_maps:
+            combined.extend(source_map.get(district, []))
+        merged[district] = combined
+    return merged
+
+def is_internal_request_authorized():
+    if not RUN_FOR_USER_API_KEY:
+        logging.error("RUN_FOR_USER_API_KEY is not set; /run-for-user is disabled")
+        return False
+    auth_header = request.headers.get("Authorization", "")
+    bearer_token = auth_header.removeprefix("Bearer ").strip()
+    api_key = (
+        request.headers.get("X-Internal-Api-Key")
+        or request.headers.get("X-Api-Key")
+        or ""
+    ).strip()
+    return any(
+        hmac.compare_digest(RUN_FOR_USER_API_KEY, token)
+        for token in (bearer_token, api_key)
+        if token
+    )
+
+def reserve_manual_scan(chat_id):
+    now = time.monotonic()
+    with manual_scan_lock:
+        if chat_id in manual_scans_running:
+            return False, "scan already running"
+
+        last_started = manual_scan_last_started.get(chat_id)
+        if (
+            last_started is not None
+            and now - last_started < MANUAL_SCAN_COOLDOWN_SECONDS
+        ):
+            remaining = int(MANUAL_SCAN_COOLDOWN_SECONDS - (now - last_started))
+            return False, f"scan cooldown active for {remaining} seconds"
+
+        manual_scans_running.add(chat_id)
+        manual_scan_last_started[chat_id] = now
+        return True, ""
+
+def release_manual_scan(chat_id):
+    with manual_scan_lock:
+        manual_scans_running.discard(chat_id)
+
+def run_manual_scan(user):
+    chat_id = user.get("chat_id")
+    acquired = False
+    try:
+        logging.info(f"Manual full scan waiting for scan slot: {chat_id}")
+        scan_semaphore.acquire()
+        acquired = True
+        process_user(user, full_scan=True)
+    finally:
+        if acquired:
+            scan_semaphore.release()
+        if chat_id:
+            release_manual_scan(chat_id)
+
+def get_bearer_token():
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return ""
+    return auth_header.removeprefix("Bearer ").strip()
+
+def get_auth_user_from_token(access_token):
+    response = requests.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {access_token}",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        logging.warning(f"Account delete auth check failed: {response.status_code} {response.text}")
+        return None
+    return response.json()
+
+def delete_auth_user(auth_user_id):
+    response = requests.delete(
+        f"{SUPABASE_URL}/auth/v1/admin/users/{auth_user_id}",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        },
+        timeout=30,
+    )
+    if response.status_code not in (200, 204):
+        raise RuntimeError(f"Auth user delete failed: {response.status_code} {response.text}")
+
+def process_user(user, full_scan=False, source_listings_by_district=None):
     chat_id = user["chat_id"]
-    min_price = user.get("min_price", 0)
-    max_price = user.get("max_price", 9999999)
-    min_area = user.get("min_area", 0)
-    max_area = user.get("max_area", 9999)
-    user_rooms = user.get("rooms") or []
-    user_districts = user.get("districts", [])
+    min_price = normalize_filter_int(user.get("min_price"), 0)
+    max_price = normalize_filter_int(user.get("max_price"), 9999999)
+    min_area = normalize_filter_float(user.get("min_area"), 0)
+    max_area = normalize_filter_float(user.get("max_area"), 9999)
+    user_rooms = normalize_room_filters(user.get("rooms"))
+    user_districts = normalize_district_filters(user.get("districts", []))
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
     channel = user.get("channel", "telegram")
     email = user.get("email", "")
 
-    feeds = get_feeds(category, intent)
+    if source_listings_by_district is None:
+        feeds = get_feeds(category, intent)
+        if full_scan:
+            logging.info(f"Full page scan for {chat_id}")
+            ss_listings = fetch_ss_full_page(
+                set(user_districts), feeds,
+                user_rooms=user_rooms,
+                min_price=min_price,
+                max_price=max_price,
+                min_area=min_area,
+                max_area=max_area,
+            )
+        else:
+            ss_listings = fetch_feeds(set(user_districts), feeds)
 
-    if full_scan:
-        logging.info(f"Full page scan for {chat_id}")
-        ss_listings = fetch_ss_full_page(
-            set(user_districts), feeds,
-            user_rooms=user_rooms,
-            min_price=min_price,
-            max_price=max_price,
-            min_area=min_area,
-            max_area=max_area,
-        )
-    else:
-        ss_listings = fetch_feeds(set(user_districts), feeds)
-
-    city24_listings = fetch_city24_listings(user_districts, category, intent)
+        city24_listings = fetch_city24_listings(user_districts, category, intent)
+        source_listings_by_district = merge_listings_by_district(user_districts, ss_listings, city24_listings)
 
     seen = load_seen_for_user(chat_id)
     new_seen = set()
     matches = []
 
     for district in user_districts:
-        combined = list(ss_listings.get(district, [])) + list(city24_listings.get(district, []))
+        combined = list(source_listings_by_district.get(district, []))
+        logging.info(f"{district}: combined listings before filtering: {len(combined)}")
         for listing in combined:
             item_id = listing.get("item_id")
-            if item_id in seen:
+            if not item_id:
+                logging.info(f"SKIP missing item_id: {listing.get('url')}")
                 continue
-            price = listing.get("price")
-            rooms = listing.get("rooms")
-            area = listing.get("area")
+            if item_id in seen:
+                logging.info(f"SKIP already seen: {item_id}")
+                continue
+            price = normalize_int(listing.get("price"))
+            rooms = normalize_room_value(listing.get("rooms"))
+            area = normalize_float(listing.get("area"))
+
             if price is None:
-                new_seen.add(item_id)
+                logging.info(f"SKIP missing price: {listing.get('url')}")
                 continue
             if user_rooms and rooms is not None and rooms not in user_rooms:
-                new_seen.add(item_id)
+                logging.info(f"SKIP rooms mismatch: rooms={rooms}, wanted={user_rooms}, url={listing.get('url')}")
                 continue
             if not (min_price <= price <= max_price):
-                new_seen.add(item_id)
+                logging.info(f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
                 continue
             if area is not None and not (min_area <= area <= max_area):
-                new_seen.add(item_id)
+                logging.info(f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
                 continue
+
+            listing["price"] = price
+            listing["rooms"] = rooms
+            listing["area"] = area
+            logging.info(f"MATCH: price={price}, rooms={rooms}, area={area}, url={listing.get('url')}")
             matches.append(listing)
             new_seen.add(item_id)
 
@@ -848,29 +1176,29 @@ def process_user(user, full_scan=False):
             send_push_notification(
                 push_token,
                 f"{len(matches)} jauni sludinājumi",
-                f"{matches[0].get('street') or category_lv} — {format_price(matches[0].get('price'))}"
+                f"{clean_text(matches[0].get('street') or category_lv)} — {format_price(matches[0].get('price'))}"
             )
 
         else:
-            message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
+            message = f"🏠 Jauni {category_lv} {intent_lv}\n"
             message += f"📍 {district_names}\n\n"
             for i, match in enumerate(matches, start=1):
-                rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+                rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
                 source = match.get('source', 'SS.lv')
                 source_badge = "City24" if source == "City24.lv" else "SS.lv"
-                address = match.get('street') or 'Nav'
-                city_name = match.get('city_name', '') if source == "City24.lv" else ""
+                address = clean_text(match.get('street') or 'Nav')
+                city_name = clean_text(match.get('city_name', '')) if source == "City24.lv" else ""
                 heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
                 price = match.get('price')
                 area = match.get('area')
                 message += (
-                    f"{i}. {icon} *{heading}*\n"
+                    f"{i}. {icon} {heading}\n"
                     f"• Cena: {format_price(price)}\n"
                     f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
                     f"• Istabas: {rooms_str}\n"
                     f"• Platība: {format_area(area)}\n"
-                    f"• Stāvs: {match['floor'] or 'Nav'}\n"
-                    f"• [Skatīt sludinājumu]({match['url']})\n\n"
+                    f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n"
+                    f"• Skatīt sludinājumu: {clean_text(match.get('url'))}\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
 
@@ -880,29 +1208,105 @@ def process_user(user, full_scan=False):
 
     save_seen_for_user(chat_id, new_seen)
 
-def run():
-    logging.info("Starting monitor run...")
-    result = supabase.table("users").select("*").eq("active", True).execute()
-    users = result.data
-    logging.info(f"Found {len(users)} active users")
-    if not users:
-        return
+def process_users_shared_latest(users):
+    cache = fetch_shared_latest_listings(users)
     for user in users:
-        process_user(user)
-    logging.info("Run complete.")
+        listings_by_district = listings_for_user_from_cache(user, cache)
+        process_user(user, source_listings_by_district=listings_by_district)
+
+def run():
+    run_started = time.monotonic()
+    if not scan_semaphore.acquire(blocking=False):
+        logging.warning("Monitor run skipped because scan concurrency limit is reached")
+        return
+
+    logging.info("Starting monitor run...")
+    try:
+        result = supabase_admin.table("users").select("*").eq("active", True).execute()
+        users = result.data
+        logging.info(f"Found {len(users)} active users")
+        if not users:
+            return
+
+        if RUN_FULL_SS_SCAN:
+            logging.info("RUN_FULL_SS_SCAN enabled; running per-user full scans")
+            for user in users:
+                process_user(user, full_scan=True)
+        else:
+            process_users_shared_latest(users)
+    finally:
+        scan_semaphore.release()
+        logging.info(f"Run complete in {time.monotonic() - run_started:.1f}s.")
 
 @flask_app.route("/run-for-user", methods=["POST"])
 def run_for_user():
-    data = request.get_json()
+    if not is_internal_request_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
     chat_id = data.get("chat_id")
     if not chat_id:
         return jsonify({"error": "chat_id required"}), 400
-    result = supabase.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+    allowed, reason = reserve_manual_scan(chat_id)
+    if not allowed:
+        logging.info(f"Manual scan rejected for {chat_id}: {reason}")
+        status_code = 409 if "running" in reason else 429
+        return jsonify({"error": reason}), status_code
+
+    try:
+        result = supabase_admin.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+    except Exception as e:
+        release_manual_scan(chat_id)
+        logging.error(f"Manual scan user lookup failed for {chat_id}: {e}")
+        return jsonify({"error": "failed to start scan"}), 500
+
     if not result.data:
-        return jsonify({"error": "user not found"}), 404
+        release_manual_scan(chat_id)
+        logging.info(f"Manual scan requested for missing or inactive chat_id: {chat_id}")
+        return jsonify({"success": True}), 202
+
     user = result.data[0]
-    threading.Thread(target=process_user, args=(user,), kwargs={"full_scan": True}).start()
+    threading.Thread(target=run_manual_scan, args=(user,), daemon=True).start()
     logging.info(f"Triggered full scan for user {chat_id}")
+    return jsonify({"success": True}), 202
+
+@flask_app.route("/delete-account", methods=["POST"])
+def delete_account():
+    access_token = get_bearer_token()
+    if not access_token:
+        return jsonify({"error": "unauthorized"}), 401
+
+    auth_user = get_auth_user_from_token(access_token)
+    auth_user_id = auth_user.get("id") if auth_user else None
+    if not auth_user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_KEY == SUPABASE_KEY:
+        logging.error("SUPABASE_SERVICE_KEY is not configured; cannot delete auth users")
+        return jsonify({"error": "account deletion is not configured"}), 500
+
+    try:
+        user_rows = (
+            supabase_admin
+            .table("users")
+            .select("chat_id")
+            .eq("auth_user_id", auth_user_id)
+            .execute()
+            .data
+            or []
+        )
+        chat_ids = [row.get("chat_id") for row in user_rows if row.get("chat_id")]
+
+        supabase_admin.table("listings").delete().eq("auth_user_id", auth_user_id).execute()
+        for chat_id in chat_ids:
+            supabase_admin.table("seen_listings").delete().eq("chat_id", chat_id).execute()
+        supabase_admin.table("users").delete().eq("auth_user_id", auth_user_id).execute()
+
+        delete_auth_user(auth_user_id)
+    except Exception as e:
+        logging.error(f"Failed to delete account for auth user {auth_user_id}: {e}")
+        return jsonify({"error": "failed to delete account"}), 500
+
+    logging.info(f"Deleted account for auth user {auth_user_id}")
     return jsonify({"success": True})
 
 @flask_app.route("/health", methods=["GET"])
