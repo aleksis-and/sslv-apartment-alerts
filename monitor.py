@@ -19,7 +19,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
-RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "true").lower() in ("1", "true", "yes", "on")
+RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "false").lower() in ("1", "true", "yes", "on")
 RUN_FOR_USER_API_KEY = os.environ.get("RUN_FOR_USER_API_KEY")
 try:
     SS_FULL_SCAN_MAX_PAGES = int(os.environ.get("SS_FULL_SCAN_MAX_PAGES", "20"))
@@ -31,6 +31,21 @@ try:
 except ValueError:
     logging.warning("Invalid MANUAL_SCAN_COOLDOWN_SECONDS; using 300")
     MANUAL_SCAN_COOLDOWN_SECONDS = 300
+try:
+    SCAN_MAX_CONCURRENCY = max(1, int(os.environ.get("SCAN_MAX_CONCURRENCY", "2")))
+except ValueError:
+    logging.warning("Invalid SCAN_MAX_CONCURRENCY; using 2")
+    SCAN_MAX_CONCURRENCY = 2
+try:
+    CITY24_LATEST_MAX_PAGES = max(1, int(os.environ.get("CITY24_LATEST_MAX_PAGES", "1")))
+except ValueError:
+    logging.warning("Invalid CITY24_LATEST_MAX_PAGES; using 1")
+    CITY24_LATEST_MAX_PAGES = 1
+try:
+    SOURCE_FETCH_DELAY_SECONDS = max(0.0, float(os.environ.get("SOURCE_FETCH_DELAY_SECONDS", "0.1")))
+except ValueError:
+    logging.warning("Invalid SOURCE_FETCH_DELAY_SECONDS; using 0.1")
+    SOURCE_FETCH_DELAY_SECONDS = 0.1
 
 if not SUPABASE_SERVICE_KEY:
     raise RuntimeError("SUPABASE_SERVICE_KEY is required for backend admin operations")
@@ -41,6 +56,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 flask_app = Flask(__name__)
+scan_semaphore = threading.BoundedSemaphore(SCAN_MAX_CONCURRENCY)
 manual_scan_lock = threading.Lock()
 manual_scans_running = set()
 manual_scan_last_started = {}
@@ -365,6 +381,15 @@ def clean_text(value):
 def escape_html(value):
     return html.escape(clean_text(value), quote=True)
 
+def pause_after_source_request():
+    if SOURCE_FETCH_DELAY_SECONDS > 0:
+        time.sleep(SOURCE_FETCH_DELAY_SECONDS)
+
+def source_get(*args, **kwargs):
+    response = requests.get(*args, **kwargs)
+    pause_after_source_request()
+    return response
+
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={
@@ -598,7 +623,7 @@ def extract_field(text, label):
 
 def fetch_listing_details(url):
     headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "lv,en;q=0.9"}
-    response = requests.get(url, headers=headers, timeout=30)
+    response = source_get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
 
@@ -690,6 +715,7 @@ def fetch_feeds(districts, feeds_dict):
             continue
         logging.info(f"Checking SS.lv feed: {feed_url}")
         feed = feedparser.parse(feed_url)
+        pause_after_source_request()
         district_listings = []
         for entry in feed.entries:
             item_id = entry.get("id") or entry.get("link") or entry.get("title")
@@ -745,7 +771,7 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
                     paginated_url = f"{base_url}page{page}.html?{query_string}" if query_string else f"{base_url}page{page}.html"
 
                 logging.info(f"Scraping SS.lv page: {paginated_url}")
-                response = requests.get(paginated_url, headers=headers, timeout=30)
+                response = source_get(paginated_url, headers=headers, timeout=30)
                 response.raise_for_status()
                 html = response.text
 
@@ -782,7 +808,7 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
 
     return listings
 
-def fetch_city24_listings(districts, category, intent):
+def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_MAX_PAGES):
     unit_type = "Apartment" if category == "apartment" else "House"
     ts_type = "sale" if intent == "buy" else "rent"
     listing_type = "apartments" if category == "apartment" else "houses"
@@ -797,87 +823,97 @@ def fetch_city24_listings(districts, category, intent):
         city_id = mapping["city"]
         district_id = mapping.get("district")
 
-        params = {
-            "address[cc]": 2,
-            "address[city][]": city_id,
-            "tsType": ts_type,
-            "unitType": unit_type,
-            "adReach": 1,
-            "itemsPerPage": 50,
-            "page": 1,
-        }
-        if district_id:
-            params["address[district][]"] = district_id
+        district_listings = []
+        seen_item_ids = set()
 
         try:
             url = "https://api.city24.lv/lv_LV/search/realties"
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, dict):
-                data = data.get("items") or data.get("data") or data.get("results") or []
-            if not isinstance(data, list):
-                logging.error(f"City24 returned unexpected payload for {district}: {type(data).__name__}")
-                continue
+            for page in range(1, max_pages + 1):
+                params = {
+                    "address[cc]": 2,
+                    "address[city][]": city_id,
+                    "tsType": ts_type,
+                    "unitType": unit_type,
+                    "adReach": 1,
+                    "itemsPerPage": 50,
+                    "page": page,
+                }
+                if district_id:
+                    params["address[district][]"] = district_id
 
-            district_listings = []
-            for item in data:
-                if not isinstance(item, dict):
-                    logging.info(f"Skipping City24 non-object item for {district}: {type(item).__name__}")
-                    continue
-                item_id = "city24_" + str(item.get("id", ""))
-                friendly_id = item.get("friendly_id", "")
-                price_raw = item.get("price")
-                rooms = item.get("room_count")
-                area = item.get("property_size")
-                addr = first_dict(item.get("address"))
-                street_name_raw = addr.get("street_name", "")
-                house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
-                apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
-                city_name_raw = addr.get("city_name", "")
-                county_name_raw = addr.get("county_name") or city_name_raw
-                attrs = first_dict(item.get("attributes"))
-                floor = attrs.get("FLOOR")
-                total_floors = attrs.get("TOTAL_FLOORS")
-                floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
+                response = source_get(url, params=params, headers=headers, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, dict):
+                    data = data.get("items") or data.get("data") or data.get("results") or []
+                if not isinstance(data, list):
+                    logging.error(f"City24 returned unexpected payload for {district}: {type(data).__name__}")
+                    break
+                if not data:
+                    break
 
-                full_address = street_name_raw
-                if house_number:
-                    full_address += f" {house_number}"
-                if apartment_number:
-                    full_address += f"-{apartment_number}"
+                for item in data:
+                    if not isinstance(item, dict):
+                        logging.info(f"Skipping City24 non-object item for {district}: {type(item).__name__}")
+                        continue
+                    item_id = "city24_" + str(item.get("id", ""))
+                    if item_id in seen_item_ids:
+                        continue
+                    seen_item_ids.add(item_id)
+                    friendly_id = item.get("friendly_id", "")
+                    price_raw = item.get("price")
+                    rooms = item.get("room_count")
+                    area = item.get("property_size")
+                    addr = first_dict(item.get("address"))
+                    street_name_raw = addr.get("street_name", "")
+                    house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
+                    apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
+                    city_name_raw = addr.get("city_name", "")
+                    county_name_raw = addr.get("county_name") or city_name_raw
+                    attrs = first_dict(item.get("attributes"))
+                    floor = attrs.get("FLOOR")
+                    total_floors = attrs.get("TOTAL_FLOORS")
+                    floor_str = f"{floor}/{total_floors}" if floor and total_floors else (str(floor) if floor else None)
 
-                county_slug = slugify(county_name_raw)
-                city_slug = slugify(city_name_raw)
-                street_slug = slugify(street_name_raw)
-                parts = [county_slug]
-                if city_slug and city_slug != county_slug:
-                    parts.append(city_slug)
-                if street_slug:
-                    parts.append(street_slug)
-                address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
-                listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
+                    full_address = street_name_raw
+                    if house_number:
+                        full_address += f" {house_number}"
+                    if apartment_number:
+                        full_address += f"-{apartment_number}"
 
-                main_image = first_dict(item.get("main_image"))
-                image_url = None
-                raw_url = main_image.get("url") or main_image.get("large_url")
-                if raw_url:
-                    image_url = raw_url.replace("{fmt:em}", "24")
+                    county_slug = slugify(county_name_raw)
+                    city_slug = slugify(city_name_raw)
+                    street_slug = slugify(street_name_raw)
+                    parts = [county_slug]
+                    if city_slug and city_slug != county_slug:
+                        parts.append(city_slug)
+                    if street_slug:
+                        parts.append(street_slug)
+                    address_slug = re.sub(r'-+', '-', "-".join(filter(None, parts))).strip('-')
+                    listing_url = f"https://www.city24.lv/real-estate/{listing_type}-for-{listing_intent}/{address_slug}/{friendly_id}?i=0"
 
-                district_listings.append({
-                    "item_id": item_id,
-                    "title": f"City24.lv — {full_address}, {city_name_raw}",
-                    "city_name": city_name_raw,
-                    "rooms": rooms,
-                    "area": float(area) if area else None,
-                    "price": int(float(price_raw)) if price_raw else None,
-                    "floor": floor_str,
-                    "street": full_address,
-                    "url": listing_url,
-                    "source": "City24.lv",
-                    "image_url": image_url,
-                })
+                    main_image = first_dict(item.get("main_image"))
+                    image_url = None
+                    raw_url = main_image.get("url") or main_image.get("large_url")
+                    if raw_url:
+                        image_url = raw_url.replace("{fmt:em}", "24")
+
+                    district_listings.append({
+                        "item_id": item_id,
+                        "title": f"City24.lv — {full_address}, {city_name_raw}",
+                        "city_name": city_name_raw,
+                        "rooms": rooms,
+                        "area": float(area) if area else None,
+                        "price": int(float(price_raw)) if price_raw else None,
+                        "floor": floor_str,
+                        "street": full_address,
+                        "url": listing_url,
+                        "source": "City24.lv",
+                        "image_url": image_url,
+                    })
+                if len(data) < 50:
+                    break
             all_listings[district] = district_listings
             logging.info(f"City24 fetched {len(district_listings)} listings for {district}")
         except Exception as e:
@@ -889,6 +925,84 @@ def get_feeds(category, intent):
     if category == 'house':
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
+
+def normalize_district_filters(districts):
+    if not districts:
+        return []
+    if isinstance(districts, str):
+        districts = districts.strip().strip("[]{}")
+        districts = [part.strip().strip('"\'') for part in districts.split(",")]
+    elif not isinstance(districts, (list, tuple, set)):
+        districts = [districts]
+    return [str(district).strip() for district in districts if str(district).strip()]
+
+def fetch_ss_latest_for_district(category, intent, district):
+    feeds = get_feeds(category, intent)
+    return fetch_feeds([district], feeds).get(district, [])
+
+def fetch_city24_latest_for_district(category, intent, district):
+    return fetch_city24_listings([district], category, intent, max_pages=CITY24_LATEST_MAX_PAGES).get(district, [])
+
+def build_latest_fetch_keys(users):
+    keys = set()
+    for user in users:
+        category = user.get("category", "apartment")
+        intent = user.get("intent", "buy")
+        for district in normalize_district_filters(user.get("districts", [])):
+            keys.add((category, intent, district))
+    return sorted(keys)
+
+def fetch_shared_latest_listings(users):
+    cache = {}
+    keys = build_latest_fetch_keys(users)
+    started = time.monotonic()
+    logging.info(f"Fetching shared latest listings for {len(keys)} category/intent/district groups")
+
+    for category, intent, district in keys:
+        ss_key = ("ss", category, intent, district)
+        city24_key = ("city24", category, intent, district)
+
+        try:
+            cache[ss_key] = fetch_ss_latest_for_district(category, intent, district)
+        except Exception as e:
+            logging.error(f"Shared SS.lv fetch failed for {category}/{intent}/{district}: {e}")
+            cache[ss_key] = []
+
+        try:
+            cache[city24_key] = fetch_city24_latest_for_district(category, intent, district)
+        except Exception as e:
+            logging.error(f"Shared City24 fetch failed for {category}/{intent}/{district}: {e}")
+            cache[city24_key] = []
+
+        logging.info(
+            f"Shared fetch {category}/{intent}/{district}: "
+            f"ss={len(cache[ss_key])}, city24={len(cache[city24_key])}"
+        )
+
+    elapsed = time.monotonic() - started
+    listing_count = sum(len(listings) for listings in cache.values())
+    logging.info(f"Shared latest fetch complete in {elapsed:.1f}s with {listing_count} raw listings")
+    return cache
+
+def listings_for_user_from_cache(user, cache):
+    category = user.get("category", "apartment")
+    intent = user.get("intent", "buy")
+    listings_by_district = {}
+    for district in normalize_district_filters(user.get("districts", [])):
+        listings_by_district[district] = (
+            list(cache.get(("ss", category, intent, district), []))
+            + list(cache.get(("city24", category, intent, district), []))
+        )
+    return listings_by_district
+
+def merge_listings_by_district(districts, *source_maps):
+    merged = {}
+    for district in districts:
+        combined = []
+        for source_map in source_maps:
+            combined.extend(source_map.get(district, []))
+        merged[district] = combined
+    return merged
 
 def is_internal_request_authorized():
     if not RUN_FOR_USER_API_KEY:
@@ -931,9 +1045,15 @@ def release_manual_scan(chat_id):
 
 def run_manual_scan(user):
     chat_id = user.get("chat_id")
+    acquired = False
     try:
+        logging.info(f"Manual full scan waiting for scan slot: {chat_id}")
+        scan_semaphore.acquire()
+        acquired = True
         process_user(user, full_scan=True)
     finally:
+        if acquired:
+            scan_semaphore.release()
         if chat_id:
             release_manual_scan(chat_id)
 
@@ -969,42 +1089,43 @@ def delete_auth_user(auth_user_id):
     if response.status_code not in (200, 204):
         raise RuntimeError(f"Auth user delete failed: {response.status_code} {response.text}")
 
-def process_user(user, full_scan=False):
+def process_user(user, full_scan=False, source_listings_by_district=None):
     chat_id = user["chat_id"]
     min_price = normalize_filter_int(user.get("min_price"), 0)
     max_price = normalize_filter_int(user.get("max_price"), 9999999)
     min_area = normalize_filter_float(user.get("min_area"), 0)
     max_area = normalize_filter_float(user.get("max_area"), 9999)
     user_rooms = normalize_room_filters(user.get("rooms"))
-    user_districts = user.get("districts", [])
+    user_districts = normalize_district_filters(user.get("districts", []))
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
     channel = user.get("channel", "telegram")
     email = user.get("email", "")
 
-    feeds = get_feeds(category, intent)
+    if source_listings_by_district is None:
+        feeds = get_feeds(category, intent)
+        if full_scan:
+            logging.info(f"Full page scan for {chat_id}")
+            ss_listings = fetch_ss_full_page(
+                set(user_districts), feeds,
+                user_rooms=user_rooms,
+                min_price=min_price,
+                max_price=max_price,
+                min_area=min_area,
+                max_area=max_area,
+            )
+        else:
+            ss_listings = fetch_feeds(set(user_districts), feeds)
 
-    if full_scan:
-        logging.info(f"Full page scan for {chat_id}")
-        ss_listings = fetch_ss_full_page(
-            set(user_districts), feeds,
-            user_rooms=user_rooms,
-            min_price=min_price,
-            max_price=max_price,
-            min_area=min_area,
-            max_area=max_area,
-        )
-    else:
-        ss_listings = fetch_feeds(set(user_districts), feeds)
-
-    city24_listings = fetch_city24_listings(user_districts, category, intent)
+        city24_listings = fetch_city24_listings(user_districts, category, intent)
+        source_listings_by_district = merge_listings_by_district(user_districts, ss_listings, city24_listings)
 
     seen = load_seen_for_user(chat_id)
     new_seen = set()
     matches = []
 
     for district in user_districts:
-        combined = list(ss_listings.get(district, [])) + list(city24_listings.get(district, []))
+        combined = list(source_listings_by_district.get(district, []))
         logging.info(f"{district}: combined listings before filtering: {len(combined)}")
         for listing in combined:
             item_id = listing.get("item_id")
@@ -1087,16 +1208,35 @@ def process_user(user, full_scan=False):
 
     save_seen_for_user(chat_id, new_seen)
 
-def run():
-    logging.info("Starting monitor run...")
-    result = supabase_admin.table("users").select("*").eq("active", True).execute()
-    users = result.data
-    logging.info(f"Found {len(users)} active users")
-    if not users:
-        return
+def process_users_shared_latest(users):
+    cache = fetch_shared_latest_listings(users)
     for user in users:
-        process_user(user, full_scan=RUN_FULL_SS_SCAN)
-    logging.info("Run complete.")
+        listings_by_district = listings_for_user_from_cache(user, cache)
+        process_user(user, source_listings_by_district=listings_by_district)
+
+def run():
+    run_started = time.monotonic()
+    if not scan_semaphore.acquire(blocking=False):
+        logging.warning("Monitor run skipped because scan concurrency limit is reached")
+        return
+
+    logging.info("Starting monitor run...")
+    try:
+        result = supabase_admin.table("users").select("*").eq("active", True).execute()
+        users = result.data
+        logging.info(f"Found {len(users)} active users")
+        if not users:
+            return
+
+        if RUN_FULL_SS_SCAN:
+            logging.info("RUN_FULL_SS_SCAN enabled; running per-user full scans")
+            for user in users:
+                process_user(user, full_scan=True)
+        else:
+            process_users_shared_latest(users)
+    finally:
+        scan_semaphore.release()
+        logging.info(f"Run complete in {time.monotonic() - run_started:.1f}s.")
 
 @flask_app.route("/run-for-user", methods=["POST"])
 def run_for_user():
