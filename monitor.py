@@ -871,6 +871,38 @@ def is_internal_request_authorized():
     api_key = request.headers.get("X-Internal-Api-Key", "").strip()
     return RUN_FOR_USER_API_KEY in (bearer_token, api_key)
 
+def get_bearer_token():
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return ""
+    return auth_header.removeprefix("Bearer ").strip()
+
+def get_auth_user_from_token(access_token):
+    response = requests.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {access_token}",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        logging.warning(f"Account delete auth check failed: {response.status_code} {response.text}")
+        return None
+    return response.json()
+
+def delete_auth_user(auth_user_id):
+    response = requests.delete(
+        f"{SUPABASE_URL}/auth/v1/admin/users/{auth_user_id}",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        },
+        timeout=30,
+    )
+    if response.status_code not in (200, 204):
+        raise RuntimeError(f"Auth user delete failed: {response.status_code} {response.text}")
+
 def process_user(user, full_scan=False):
     chat_id = user["chat_id"]
     min_price = normalize_filter_int(user.get("min_price"), 0)
@@ -1014,6 +1046,46 @@ def run_for_user():
     user = result.data[0]
     threading.Thread(target=process_user, args=(user,), kwargs={"full_scan": True}).start()
     logging.info(f"Triggered full scan for user {chat_id}")
+    return jsonify({"success": True})
+
+@flask_app.route("/delete-account", methods=["POST"])
+def delete_account():
+    access_token = get_bearer_token()
+    if not access_token:
+        return jsonify({"error": "unauthorized"}), 401
+
+    auth_user = get_auth_user_from_token(access_token)
+    auth_user_id = auth_user.get("id") if auth_user else None
+    if not auth_user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_KEY == SUPABASE_KEY:
+        logging.error("SUPABASE_SERVICE_KEY is not configured; cannot delete auth users")
+        return jsonify({"error": "account deletion is not configured"}), 500
+
+    try:
+        user_rows = (
+            supabase_admin
+            .table("users")
+            .select("chat_id")
+            .eq("auth_user_id", auth_user_id)
+            .execute()
+            .data
+            or []
+        )
+        chat_ids = [row.get("chat_id") for row in user_rows if row.get("chat_id")]
+
+        supabase_admin.table("listings").delete().eq("auth_user_id", auth_user_id).execute()
+        for chat_id in chat_ids:
+            supabase_admin.table("seen_listings").delete().eq("chat_id", chat_id).execute()
+        supabase_admin.table("users").delete().eq("auth_user_id", auth_user_id).execute()
+
+        delete_auth_user(auth_user_id)
+    except Exception as e:
+        logging.error(f"Failed to delete account for auth user {auth_user_id}: {e}")
+        return jsonify({"error": "failed to delete account"}), 500
+
+    logging.info(f"Deleted account for auth user {auth_user_id}")
     return jsonify({"success": True})
 
 @flask_app.route("/health", methods=["GET"])
