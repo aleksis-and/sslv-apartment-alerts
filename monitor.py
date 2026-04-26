@@ -1,7 +1,9 @@
 import re
 import os
+import html
 import logging
 import threading
+import time
 from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from supabase import create_client
@@ -13,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ["SUPABASE_KEY"])
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "true").lower() in ("1", "true", "yes", "on")
@@ -23,11 +25,24 @@ try:
 except ValueError:
     logging.warning("Invalid SS_FULL_SCAN_MAX_PAGES; using 20")
     SS_FULL_SCAN_MAX_PAGES = 20
+try:
+    MANUAL_SCAN_COOLDOWN_SECONDS = max(0, int(os.environ.get("MANUAL_SCAN_COOLDOWN_SECONDS", "300")))
+except ValueError:
+    logging.warning("Invalid MANUAL_SCAN_COOLDOWN_SECONDS; using 300")
+    MANUAL_SCAN_COOLDOWN_SECONDS = 300
+
+if not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_KEY is required for backend admin operations")
+if SUPABASE_SERVICE_KEY == SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_KEY must be a dedicated service-role key, not SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 flask_app = Flask(__name__)
+manual_scan_lock = threading.Lock()
+manual_scans_running = set()
+manual_scan_last_started = {}
 
 CITY24_DISTRICT_MAP = {
     "centrs":                   {"city": 245396, "district": 270700},
@@ -341,12 +356,19 @@ def save_seen_for_user(chat_id, new_ids):
     rows = [{"id": id, "chat_id": chat_id} for id in new_ids]
     supabase.table("seen_listings").upsert(rows).execute()
 
+def clean_text(value):
+    if value is None:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+def escape_html(value):
+    return html.escape(clean_text(value), quote=True)
+
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }, timeout=30)
 
@@ -360,8 +382,8 @@ def send_email_message(to_email, subject, html_content):
             },
             json={
                 "from": "Paziņojumi <no-reply@pazinojumi.lv>",
-                "to": [to_email],
-                "subject": subject,
+                "to": [clean_text(to_email)],
+                "subject": clean_text(subject),
                 "html": html_content
             },
             timeout=30
@@ -430,26 +452,31 @@ def build_email_html(matches, category, intent, district_names):
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = "🏢" if category == "apartment" else "🏡"
     items_html = ""
+    safe_district_names = escape_html(district_names)
     for i, match in enumerate(matches, start=1):
-        rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+        rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
         source = match.get('source', 'SS.lv')
-        source_badge = "City24" if source == "City24.lv" else "SS.lv"
-        address = match.get('street') or 'Nav'
-        city_name = match.get('city_name', '') if source == "City24.lv" else ""
+        source_badge = "City24" if source == "City24.lv" else clean_text(source or "SS.lv")
+        address = clean_text(match.get('street') or 'Nav')
+        city_name = clean_text(match.get('city_name', '')) if source == "City24.lv" else ""
         heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
         price = match.get('price')
         area = match.get('area')
+        safe_heading = escape_html(heading)
+        safe_rooms = escape_html(rooms_str)
+        safe_floor = escape_html(match.get('floor') or 'Nav')
+        safe_url = escape_html(match.get('url') or '#')
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
-            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {heading}</p>
+            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {safe_heading}</p>
             <table style="width:100%;border-collapse:collapse;">
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;width:100px;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;">{format_price(price)}</td></tr>
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;">{format_price_per_sqm(price, area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{rooms_str}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{safe_rooms}</td></tr>
                 <tr><td style="color:#888;font-size:13px;padding:3px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;">{format_area(area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{match['floor'] or 'Nav'}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{safe_floor}</td></tr>
             </table>
-            <a href="{match['url']}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
+            <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
         """
     return f"""
@@ -460,7 +487,7 @@ def build_email_html(matches, category, intent, district_names):
         <div style="max-width:560px;margin:0 auto;">
             <div style="text-align:center;margin-bottom:24px;">
                 <h1 style="font-size:22px;font-weight:700;color:#1a1a1a;margin:0;">Jauni {category_lv} {intent_lv}</h1>
-                <p style="color:#888;font-size:14px;margin-top:6px;">📍 {district_names}</p>
+                <p style="color:#888;font-size:14px;margin-top:6px;">📍 {safe_district_names}</p>
             </div>
             {items_html}
             <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #f0ece4;">
@@ -864,12 +891,42 @@ def get_feeds(category, intent):
 
 def is_internal_request_authorized():
     if not RUN_FOR_USER_API_KEY:
-        logging.warning("RUN_FOR_USER_API_KEY is not set; /run-for-user is not protected")
-        return True
+        logging.error("RUN_FOR_USER_API_KEY is not set; /run-for-user is disabled")
+        return False
     auth_header = request.headers.get("Authorization", "")
     bearer_token = auth_header.removeprefix("Bearer ").strip()
     api_key = request.headers.get("X-Internal-Api-Key", "").strip()
     return RUN_FOR_USER_API_KEY in (bearer_token, api_key)
+
+def reserve_manual_scan(chat_id):
+    now = time.monotonic()
+    with manual_scan_lock:
+        if chat_id in manual_scans_running:
+            return False, "scan already running"
+
+        last_started = manual_scan_last_started.get(chat_id)
+        if (
+            last_started is not None
+            and now - last_started < MANUAL_SCAN_COOLDOWN_SECONDS
+        ):
+            remaining = int(MANUAL_SCAN_COOLDOWN_SECONDS - (now - last_started))
+            return False, f"scan cooldown active for {remaining} seconds"
+
+        manual_scans_running.add(chat_id)
+        manual_scan_last_started[chat_id] = now
+        return True, ""
+
+def release_manual_scan(chat_id):
+    with manual_scan_lock:
+        manual_scans_running.discard(chat_id)
+
+def run_manual_scan(user):
+    chat_id = user.get("chat_id")
+    try:
+        process_user(user, full_scan=True)
+    finally:
+        if chat_id:
+            release_manual_scan(chat_id)
 
 def get_bearer_token():
     auth_header = request.headers.get("Authorization", "")
@@ -989,29 +1046,29 @@ def process_user(user, full_scan=False):
             send_push_notification(
                 push_token,
                 f"{len(matches)} jauni sludinājumi",
-                f"{matches[0].get('street') or category_lv} — {format_price(matches[0].get('price'))}"
+                f"{clean_text(matches[0].get('street') or category_lv)} — {format_price(matches[0].get('price'))}"
             )
 
         else:
-            message = f"🏠 *Jauni {category_lv} {intent_lv}*\n"
+            message = f"🏠 Jauni {category_lv} {intent_lv}\n"
             message += f"📍 {district_names}\n\n"
             for i, match in enumerate(matches, start=1):
-                rooms_str = str(match['rooms']) if match['rooms'] is not None else "Nav"
+                rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
                 source = match.get('source', 'SS.lv')
                 source_badge = "City24" if source == "City24.lv" else "SS.lv"
-                address = match.get('street') or 'Nav'
-                city_name = match.get('city_name', '') if source == "City24.lv" else ""
+                address = clean_text(match.get('street') or 'Nav')
+                city_name = clean_text(match.get('city_name', '')) if source == "City24.lv" else ""
                 heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
                 price = match.get('price')
                 area = match.get('area')
                 message += (
-                    f"{i}. {icon} *{heading}*\n"
+                    f"{i}. {icon} {heading}\n"
                     f"• Cena: {format_price(price)}\n"
                     f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
                     f"• Istabas: {rooms_str}\n"
                     f"• Platība: {format_area(area)}\n"
-                    f"• Stāvs: {match['floor'] or 'Nav'}\n"
-                    f"• [Skatīt sludinājumu]({match['url']})\n\n"
+                    f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n"
+                    f"• Skatīt sludinājumu: {clean_text(match.get('url'))}\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
 
@@ -1040,13 +1097,28 @@ def run_for_user():
     chat_id = data.get("chat_id")
     if not chat_id:
         return jsonify({"error": "chat_id required"}), 400
-    result = supabase.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+    allowed, reason = reserve_manual_scan(chat_id)
+    if not allowed:
+        logging.info(f"Manual scan rejected for {chat_id}: {reason}")
+        status_code = 409 if "running" in reason else 429
+        return jsonify({"error": reason}), status_code
+
+    try:
+        result = supabase.table("users").select("*").eq("chat_id", chat_id).eq("active", True).execute()
+    except Exception as e:
+        release_manual_scan(chat_id)
+        logging.error(f"Manual scan user lookup failed for {chat_id}: {e}")
+        return jsonify({"error": "failed to start scan"}), 500
+
     if not result.data:
-        return jsonify({"error": "user not found"}), 404
+        release_manual_scan(chat_id)
+        logging.info(f"Manual scan requested for missing or inactive chat_id: {chat_id}")
+        return jsonify({"success": True}), 202
+
     user = result.data[0]
-    threading.Thread(target=process_user, args=(user,), kwargs={"full_scan": True}).start()
+    threading.Thread(target=run_manual_scan, args=(user,), daemon=True).start()
     logging.info(f"Triggered full scan for user {chat_id}")
-    return jsonify({"success": True})
+    return jsonify({"success": True}), 202
 
 @flask_app.route("/delete-account", methods=["POST"])
 def delete_account():
