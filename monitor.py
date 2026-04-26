@@ -1,6 +1,7 @@
 import re
 import os
 import html
+import hmac
 import logging
 import threading
 import time
@@ -895,8 +896,16 @@ def is_internal_request_authorized():
         return False
     auth_header = request.headers.get("Authorization", "")
     bearer_token = auth_header.removeprefix("Bearer ").strip()
-    api_key = request.headers.get("X-Internal-Api-Key", "").strip()
-    return RUN_FOR_USER_API_KEY in (bearer_token, api_key)
+    api_key = (
+        request.headers.get("X-Internal-Api-Key")
+        or request.headers.get("X-Api-Key")
+        or ""
+    ).strip()
+    return any(
+        hmac.compare_digest(RUN_FOR_USER_API_KEY, token)
+        for token in (bearer_token, api_key)
+        if token
+    )
 
 def reserve_manual_scan(chat_id):
     now = time.monotonic()
