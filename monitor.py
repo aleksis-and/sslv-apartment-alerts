@@ -479,7 +479,7 @@ def build_email_html(matches, category, intent, district_names):
     icon = "🏢" if category == "apartment" else "🏡"
     items_html = ""
     safe_district_names = escape_html(district_names)
-    for i, match in enumerate(matches, start=1):
+    for match in matches:
         rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
         source = match.get('source', 'SS.lv')
         source_badge = "City24" if source == "City24.lv" else clean_text(source or "SS.lv")
@@ -493,14 +493,14 @@ def build_email_html(matches, category, intent, district_names):
         safe_floor = escape_html(match.get('floor') or 'Nav')
         safe_url = escape_html(match.get('url') or '#')
         items_html += f"""
-        <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:16px;margin-bottom:12px;">
-            <p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:10px;">{i}. {icon} {safe_heading}</p>
-            <table style="width:100%;border-collapse:collapse;">
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;width:100px;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;">{format_price(price)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;">{format_price_per_sqm(price, area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;">{safe_rooms}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;">{format_area(area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:3px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;">{safe_floor}</td></tr>
+        <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:20px 18px;margin:0 auto 14px auto;max-width:520px;text-align:center;">
+            <p style="font-size:15px;font-weight:700;color:#1a1a1a;margin:0 0 12px 0;line-height:1.35;">{icon} {safe_heading}</p>
+            <table style="margin:0 auto;border-collapse:collapse;text-align:left;">
+                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;padding:4px 0;">{format_price(price)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_price_per_sqm(price, area)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{safe_rooms}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_area(area)}</td></tr>
+                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{safe_floor}</td></tr>
             </table>
             <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
