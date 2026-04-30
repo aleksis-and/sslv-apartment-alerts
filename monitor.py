@@ -20,6 +20,7 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 RUN_FULL_SS_SCAN = os.environ.get("RUN_FULL_SS_SCAN", "false").lower() in ("1", "true", "yes", "on")
+LOG_SKIPS = os.environ.get("LOG_SKIPS", "false").lower() in ("1", "true", "yes", "on")
 RUN_FOR_USER_API_KEY = os.environ.get("RUN_FOR_USER_API_KEY")
 try:
     SS_FULL_SCAN_MAX_PAGES = int(os.environ.get("SS_FULL_SCAN_MAX_PAGES", "20"))
@@ -421,9 +422,10 @@ def send_email_message(to_email, subject, html_content):
     except Exception as e:
         logging.error(f"Email error: {e}")
 
-def send_push_notification(push_token, title, body):
+def send_push_notification(push_token, title, body, chat_id=None):
     if not push_token:
-        return
+        logging.warning(f"Push skipped for {chat_id or 'unknown user'}: missing push_token")
+        return False
     try:
         response = requests.post(
             "https://exp.host/--/api/v2/push/send",
@@ -440,9 +442,14 @@ def send_push_notification(push_token, title, body):
             },
             timeout=30
         )
-        logging.info(f"Push sent: {response.status_code} {response.text}")
+        if response.ok:
+            logging.info(f"Push sent for {chat_id or 'unknown user'}: {response.status_code} {response.text}")
+            return True
+        logging.error(f"Push failed for {chat_id or 'unknown user'}: {response.status_code} {response.text}")
+        return False
     except Exception as e:
-        logging.error(f"Push error: {e}")
+        logging.error(f"Push error for {chat_id or 'unknown user'}: {e}")
+        return False
 
 def save_listings_to_db(user, matches, district_names):
     global supabase_admin
@@ -936,6 +943,18 @@ def normalize_district_filters(districts):
         districts = [districts]
     return [str(district).strip() for district in districts if str(district).strip()]
 
+def record_skip(skip_counts, reason, message):
+    skip_counts[reason] = skip_counts.get(reason, 0) + 1
+    if LOG_SKIPS:
+        logging.info(message)
+
+def log_skip_summary(district, skip_counts):
+    if LOG_SKIPS or not skip_counts:
+        return
+    total = sum(skip_counts.values())
+    details = ", ".join(f"{reason}={count}" for reason, count in sorted(skip_counts.items()))
+    logging.info(f"{district}: skipped {total} listings ({details})")
+
 def fetch_ss_latest_for_district(category, intent, district):
     feeds = get_feeds(category, intent)
     return fetch_feeds([district], feeds).get(district, [])
@@ -1126,30 +1145,31 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
 
     for district in user_districts:
         combined = list(source_listings_by_district.get(district, []))
+        skip_counts = {}
         logging.info(f"{district}: combined listings before filtering: {len(combined)}")
         for listing in combined:
             item_id = listing.get("item_id")
             if not item_id:
-                logging.info(f"SKIP missing item_id: {listing.get('url')}")
+                record_skip(skip_counts, "missing_item_id", f"SKIP missing item_id: {listing.get('url')}")
                 continue
             if item_id in seen:
-                logging.info(f"SKIP already seen: {item_id}")
+                record_skip(skip_counts, "already_seen", f"SKIP already seen: {item_id}")
                 continue
             price = normalize_int(listing.get("price"))
             rooms = normalize_room_value(listing.get("rooms"))
             area = normalize_float(listing.get("area"))
 
             if price is None:
-                logging.info(f"SKIP missing price: {listing.get('url')}")
+                record_skip(skip_counts, "missing_price", f"SKIP missing price: {listing.get('url')}")
                 continue
             if user_rooms and rooms is not None and rooms not in user_rooms:
-                logging.info(f"SKIP rooms mismatch: rooms={rooms}, wanted={user_rooms}, url={listing.get('url')}")
+                record_skip(skip_counts, "rooms_mismatch", f"SKIP rooms mismatch: rooms={rooms}, wanted={user_rooms}, url={listing.get('url')}")
                 continue
             if not (min_price <= price <= max_price):
-                logging.info(f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
+                record_skip(skip_counts, "price_mismatch", f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
                 continue
             if area is not None and not (min_area <= area <= max_area):
-                logging.info(f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
+                record_skip(skip_counts, "area_mismatch", f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
                 continue
 
             listing["price"] = price
@@ -1158,6 +1178,7 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
             logging.info(f"MATCH: price={price}, rooms={rooms}, area={area}, url={listing.get('url')}")
             matches.append(listing)
             new_seen.add(item_id)
+        log_skip_summary(district, skip_counts)
 
     if matches:
         category_lv = "dzīvokļi" if category == "apartment" else "mājas"
@@ -1176,7 +1197,8 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
             send_push_notification(
                 push_token,
                 f"{len(matches)} jauni sludinājumi",
-                f"{clean_text(matches[0].get('street') or category_lv)} — {format_price(matches[0].get('price'))}"
+                f"{clean_text(matches[0].get('street') or category_lv)} — {format_price(matches[0].get('price'))}",
+                chat_id,
             )
 
         else:
