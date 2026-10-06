@@ -61,6 +61,8 @@ scan_semaphore = threading.BoundedSemaphore(SCAN_MAX_CONCURRENCY)
 manual_scan_lock = threading.Lock()
 manual_scans_running = set()
 manual_scan_last_started = {}
+guest_source_cache = {}
+guest_source_lock = threading.Lock()
 
 CITY24_DISTRICT_MAP = {
     "centrs":                   {"city": 245396, "district": 270700},
@@ -1334,6 +1336,76 @@ def delete_account():
 @flask_app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+@flask_app.route("/browse-listings", methods=["POST"])
+def browse_listings():
+    if not is_internal_request_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    filters = request.get_json(silent=True)
+    if not isinstance(filters, dict):
+        return jsonify({"error": "Invalid filters"}), 400
+    category = filters.get("category", "apartment")
+    intent = filters.get("intent", "buy")
+    districts = filters.get("districts", [])
+    rooms = filters.get("rooms", [])
+    if (category not in ("apartment", "house") or intent not in ("buy", "rent")
+            or not isinstance(districts, list) or not 1 <= len(districts) <= 3
+            or any(not isinstance(d, str) or d not in DISTRICT_NAMES for d in districts)
+            or not isinstance(rooms, list)
+            or any(type(r) is not int or r < 1 or r > 6 for r in rooms)):
+        return jsonify({"error": "Invalid filters; select up to three districts"}), 400
+    bounds = {}
+    for field, default in (("min_price", 0), ("max_price", 10000000),
+                           ("min_area", 0), ("max_area", 10000)):
+        value = filters.get(field, default)
+        if type(value) not in (int, float) or not 0 <= value <= 10000000:
+            return jsonify({"error": "Invalid range"}), 400
+        bounds[field] = value
+    if bounds["min_price"] > bounds["max_price"] or bounds["min_area"] > bounds["max_area"]:
+        return jsonify({"error": "Invalid range"}), 400
+    if not scan_semaphore.acquire(blocking=False):
+        return jsonify({"error": "Search is busy. Please try again."}), 503
+    try:
+        results = {}
+        for district in dict.fromkeys(districts):
+            key = (category, intent, district)
+            with guest_source_lock:
+                cached = guest_source_cache.get(key)
+            if cached and time.monotonic() - cached[0] < 300:
+                listings = cached[1]
+            else:
+                listings = (fetch_ss_latest_for_district(category, intent, district)
+                            + fetch_city24_latest_for_district(category, intent, district))
+                with guest_source_lock:
+                    if len(guest_source_cache) >= 128:
+                        guest_source_cache.pop(next(iter(guest_source_cache)))
+                    guest_source_cache[key] = (time.monotonic(), listings)
+            for listing in listings:
+                price = normalize_int(listing.get("price"))
+                area = normalize_float(listing.get("area"))
+                room = normalize_room_value(listing.get("rooms"))
+                if price is None or not bounds["min_price"] <= price <= bounds["max_price"]:
+                    continue
+                if area is None or not bounds["min_area"] <= area <= bounds["max_area"]:
+                    continue
+                if rooms and (room is None or not any(room >= 6 if r == 6 else room == r for r in rooms)):
+                    continue
+                item_id = listing.get("item_id") or listing.get("url")
+                if not item_id:
+                    continue
+                # Explicit projection prevents account or delivery metadata entering guest responses.
+                results[item_id] = {
+                    "id": item_id, "title": listing.get("title", ""), "price": price,
+                    "rooms": room, "area": area, "district": DISTRICT_NAMES[district],
+                    "url": listing.get("url", ""), "image_url": listing.get("image_url"),
+                    "source": listing.get("source", "SS.lv"),
+                }
+        return jsonify({"listings": list(results.values())[:150]})
+    except Exception:
+        logging.exception("Guest listing search failed")
+        return jsonify({"error": "Unable to search listings"}), 502
+    finally:
+        scan_semaphore.release()
 
 if __name__ == "__main__":
     scheduler = BlockingScheduler()

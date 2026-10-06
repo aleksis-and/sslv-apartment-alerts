@@ -177,5 +177,48 @@ class SharedLatestFetchTests(unittest.TestCase):
         process_user.assert_not_called()
 
 
+class GuestSearchTests(unittest.TestCase):
+    def setUp(self):
+        monitor.guest_source_cache.clear()
+        self.filters = {"category": "apartment", "intent": "buy", "districts": ["centrs"],
+                        "rooms": [6], "min_price": 100, "max_price": 500,
+                        "min_area": 10, "max_area": 200}
+
+    def search(self, filters=None, authorized=True):
+        with (patch.object(monitor, "is_internal_request_authorized", return_value=authorized),
+              patch.object(monitor.request, "get_json", return_value=filters if filters is not None else self.filters)):
+            return monitor.browse_listings()
+
+    def test_search_projects_public_fields_and_supports_six_plus(self):
+        listing = {"item_id": "public-1", "price": 200, "area": 100, "rooms": 7,
+                   "url": "https://www.ss.lv/property", "auth_user_id": "private", "push_token": "private"}
+        with (patch.object(monitor, "fetch_ss_latest_for_district", return_value=[listing]) as ss,
+              patch.object(monitor, "fetch_city24_latest_for_district", return_value=[]),
+              patch.object(monitor, "supabase_admin", None)):
+            result = self.search()
+            again = self.search()
+        self.assertEqual(result, again)
+        ss.assert_called_once()
+        self.assertEqual(result["listings"][0]["rooms"], 7)
+        self.assertNotIn("auth_user_id", result["listings"][0])
+        self.assertNotIn("push_token", result["listings"][0])
+
+    def test_requires_internal_key(self):
+        self.assertEqual(self.search(authorized=False)[1], 401)
+
+    def test_rejects_invalid_districts_and_ranges_before_fetching(self):
+        for update in ({"districts": ["../private"]}, {"districts": ["centrs"] * 4},
+                       {"min_price": 600}, {"rooms": [True]}, {"max_area": float("nan")}):
+            with patch.object(monitor, "fetch_ss_latest_for_district") as fetch:
+                self.assertEqual(self.search({**self.filters, **update})[1], 400)
+                fetch.assert_not_called()
+
+    def test_fetch_failure_returns_error_and_releases_capacity(self):
+        with patch.object(monitor, "fetch_ss_latest_for_district", side_effect=RuntimeError("offline")):
+            self.assertEqual(self.search()[1], 502)
+        self.assertTrue(monitor.scan_semaphore.acquire(blocking=False))
+        monitor.scan_semaphore.release()
+
+
 if __name__ == "__main__":
     unittest.main()
