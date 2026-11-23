@@ -482,10 +482,13 @@ def save_listings_to_db(user, matches, district_names):
         except Exception as e:
             logging.error(f"Failed to save listings to DB: {e}")
 
+CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali"}
+CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱"}
+
 def build_email_html(matches, category, intent, district_names):
-    category_lv = "dzīvokļi" if category == "apartment" else "mājas"
+    category_lv = CATEGORY_NAMES.get(category, "sludinājumi")
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
-    icon = "🏢" if category == "apartment" else "🏡"
+    icon = CATEGORY_ICONS.get(category, "🏠")
     items_html = ""
     safe_district_names = escape_html(district_names)
     for match in matches:
@@ -501,15 +504,18 @@ def build_email_html(matches, category, intent, district_names):
         safe_rooms = escape_html(rooms_str)
         safe_floor = escape_html(match.get('floor') or 'Nav')
         safe_url = escape_html(match.get('url') or '#')
+        property_rows = []
+        if category != "land":
+            property_rows = [("Istabas", safe_rooms), ("Stāvs", safe_floor)]
+        detail_rows = "".join(f'<tr><td style="color:#888">{label}</td><td>{value}</td></tr>' for label, value in property_rows)
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:20px 18px;margin:0 auto 14px auto;max-width:520px;text-align:center;">
             <p style="font-size:15px;font-weight:700;color:#1a1a1a;margin:0 0 12px 0;line-height:1.35;">{icon} {safe_heading}</p>
             <table style="margin:0 auto;border-collapse:collapse;text-align:left;">
                 <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;padding:4px 0;">{format_price(price)}</td></tr>
                 <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_price_per_sqm(price, area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Istabas</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{safe_rooms}</td></tr>
+                {detail_rows}
                 <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_area(area)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Stāvs</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{safe_floor}</td></tr>
             </table>
             <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
@@ -661,6 +667,17 @@ def fetch_listing_details(url):
     rooms_raw = extract_field(text, "rooms")
     area_raw = extract_field(text, "area")
     price_raw = extract_field(text, "price")
+    if "/plots-and-lands/" in url:
+        def cell(field_id):
+            match = re.search(r'<td\b[^>]*\bid="' + field_id + r'"[^>]*>(.*?)</td>', html, re.S | re.I)
+            return re.sub(r'<[^>]*>|&nbsp;|&#160;', ' ', match.group(1)).strip() if match else ''
+        size = re.fullmatch(r'([\d\s]+(?:[.,]\d+)?)\s*(m²|m2|ha)', cell('tdo_3'), re.I)
+        area_raw = None
+        if size:
+            amount = float(''.join(size[1].split()).replace(',', '.'))
+            area_raw = str(amount * (10000 if size[2].lower() == 'ha' else 1))
+        price = re.match(r'([\d\s]+)\s*€', cell('tdo_8'))
+        price_raw = price[1] if price else None
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
     if street_raw:
@@ -681,7 +698,7 @@ def fetch_listing_details(url):
             title_rooms = re.search(r'(\d+)\s*-?\s*istabu', search_text, re.IGNORECASE)
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
-    if not price_raw:
+    if not price_raw and '/plots-and-lands/' not in url:
         title_price = re.search(r'(\d[\d\s]*)\s*€', title)
         if title_price:
             price_raw = title_price.group(1)
@@ -767,7 +784,8 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
             params.append(("topt[1][min]", min(user_rooms)))
             params.append(("topt[1][max]", max(user_rooms)))
 
-        query_string = urlencode(params)
+        # Land search units vary by listing; compare normalized square metres locally.
+        query_string = "" if "/plots-and-lands/" in feed_url else urlencode(params)
         district_listings = []
         district_seen_paths = set()
         page = 1
@@ -818,9 +836,11 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
     return listings
 
 def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_MAX_PAGES):
-    unit_type = "Apartment" if category == "apartment" else "House"
+    if category == "land" and intent != "buy":
+        return {}
+    unit_type = {"land": "Land", "apartment": "Apartment", "house": "House"}[category]
     ts_type = "sale" if intent == "buy" else "rent"
-    listing_type = "apartments" if category == "apartment" else "houses"
+    listing_type = {"land": "land-lots", "apartment": "apartments", "house": "houses"}[category]
     listing_intent = "sale" if intent == "buy" else "rent"
     all_listings = {}
 
@@ -874,8 +894,16 @@ def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_M
                     price_raw = item.get("price")
                     rooms = item.get("room_count")
                     area = item.get("property_size")
+                    if category == "land":
+                        if (item.get("unit_type") != "Land" or item.get("transaction_type") != "/transaction_types/1"
+                                or str(item.get("lot_size_unit_id")) != "1" or not friendly_id or not item.get("id")):
+                            continue
+                        area = normalize_float(item.get("lot_size"))
+                        price_raw = normalize_float(price_raw)
+                        if not area or area <= 0 or not price_raw or price_raw <= 0:
+                            continue
                     addr = first_dict(item.get("address"))
-                    street_name_raw = addr.get("street_name", "")
+                    street_name_raw = addr.get("street_name") or ""
                     house_number = addr.get("house_number", "") if addr.get("export_house_number") else ""
                     apartment_number = addr.get("apartment_number", "") if addr.get("export_apartment_number") else ""
                     city_name_raw = addr.get("city_name", "")
@@ -931,6 +959,8 @@ def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_M
     return all_listings
 
 def get_feeds(category, intent):
+    if category == 'land':
+        return {k: url.replace('/flats/', '/plots-and-lands/') for k, url in APARTMENT_BUY_FEEDS.items()} if intent == 'buy' else {}
     if category == 'house':
         return HOUSE_BUY_FEEDS if intent == 'buy' else HOUSE_RENT_FEEDS
     return APARTMENT_BUY_FEEDS if intent == 'buy' else APARTMENT_RENT_FEEDS
@@ -1170,6 +1200,10 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
             if not (min_price <= price <= max_price):
                 record_skip(skip_counts, "price_mismatch", f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
                 continue
+            if category == "land" and (area is None or (
+                listing.get("source") != "City24.lv" and "/plots-and-lands/" not in listing.get("url", "")
+            )):
+                continue
             if area is not None and not (min_area <= area <= max_area):
                 record_skip(skip_counts, "area_mismatch", f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
                 continue
@@ -1183,9 +1217,9 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
         log_skip_summary(district, skip_counts)
 
     if matches:
-        category_lv = "dzīvokļi" if category == "apartment" else "mājas"
+        category_lv = CATEGORY_NAMES.get(category, "sludinājumi")
         intent_lv = "pārdošanā" if intent == "buy" else "īrei"
-        icon = "🏢" if category == "apartment" else "🏡"
+        icon = CATEGORY_ICONS.get(category, "🏠")
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
 
         if channel == "email" and email:
@@ -1215,13 +1249,15 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
                 heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
                 price = match.get('price')
                 area = match.get('area')
+                room_line = "" if category == "land" else f"• Istabas: {rooms_str}\n"
+                floor_line = "" if category == "land" else f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n"
                 message += (
                     f"{i}. {icon} {heading}\n"
                     f"• Cena: {format_price(price)}\n"
                     f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
-                    f"• Istabas: {rooms_str}\n"
+                    f"{room_line}"
                     f"• Platība: {format_area(area)}\n"
-                    f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n"
+                    f"{floor_line}"
                     f"• Skatīt sludinājumu: {clean_text(match.get('url'))}\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
