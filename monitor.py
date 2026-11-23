@@ -6,6 +6,7 @@ import hashlib
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from supabase import create_client
@@ -483,8 +484,17 @@ def save_listings_to_db(user, matches, district_names):
         except Exception as e:
             logging.error(f"Failed to save listings to DB: {e}")
 
-CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali"}
-CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱"}
+CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali", "commercial": "komerctelpas"}
+CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱", "commercial": "🏢"}
+RESIDENTIAL_CATEGORIES = ("apartment", "house")
+SS_COMMERCIAL_SECTIONS = (
+    "offices", "premises/shops", "premises/storehouses-and-storages",
+    "premises/production-facilities", "premises/workshops", "premises/hangars",
+    "premises/restaurants-cafe-dining-halls", "premises/saloons",
+    "premises/premises-for-service-centers", "premises/buildings-and-complexes",
+    "premises/training-halls", "premises/basements-and-semi-basements",
+    "premises/playing-halls", "premises/other",
+)
 
 def email_unsubscribe_url(alert_id):
     if not RUN_FOR_USER_API_KEY or not alert_id:
@@ -520,7 +530,7 @@ def build_email_html(matches, category, intent, district_names, unsubscribe_url=
         safe_floor = escape_html(match.get('floor') or 'Nav')
         safe_url = escape_html(match.get('url') or '#')
         property_rows = []
-        if category != "land":
+        if category in RESIDENTIAL_CATEGORIES:
             property_rows = [("Istabas", safe_rooms), ("Stāvs", safe_floor)]
         detail_rows = "".join(f'<tr><td style="color:#888">{label}</td><td>{value}</td></tr>' for label, value in property_rows)
         items_html += f"""
@@ -682,7 +692,8 @@ def fetch_listing_details(url):
     rooms_raw = extract_field(text, "rooms")
     area_raw = extract_field(text, "area")
     price_raw = extract_field(text, "price")
-    if "/plots-and-lands/" in url:
+    structured_area = any(section in url for section in ("/plots-and-lands/", "/offices/", "/premises/"))
+    if structured_area:
         def cell(field_id):
             match = re.search(r'<td\b[^>]*\bid="' + field_id + r'"[^>]*>(.*?)</td>', html, re.S | re.I)
             return re.sub(r'<[^>]*>|&nbsp;|&#160;', ' ', match.group(1)).strip() if match else ''
@@ -691,7 +702,7 @@ def fetch_listing_details(url):
         if size:
             amount = float(''.join(size[1].split()).replace(',', '.'))
             area_raw = str(amount * (10000 if size[2].lower() == 'ha' else 1))
-        price = re.match(r'([\d\s]+)\s*€', cell('tdo_8'))
+        price = re.match(r'([\d\s]+)(?:[.,]\d{1,2})?\s*€', cell('tdo_8'))
         price_raw = price[1] if price else None
     floor_raw = extract_field(text, "floor")
     street_raw = extract_field(text, "street")
@@ -713,7 +724,7 @@ def fetch_listing_details(url):
             title_rooms = re.search(r'(\d+)\s*-?\s*istabu', search_text, re.IGNORECASE)
             if title_rooms:
                 rooms_raw = title_rooms.group(1)
-    if not price_raw and '/plots-and-lands/' not in url:
+    if not price_raw and not structured_area:
         title_price = re.search(r'(\d[\d\s]*)\s*€', title)
         if title_price:
             price_raw = title_price.group(1)
@@ -755,8 +766,17 @@ def fetch_feeds(districts, feeds_dict):
             logging.info(f"No feed for district: {district} — skipping")
             continue
         logging.info(f"Checking SS.lv feed: {feed_url}")
-        feed = feedparser.parse(feed_url)
-        pause_after_source_request()
+        if any(section in feed_url for section in ("/offices/", "/premises/")):
+            try:
+                response = source_get(feed_url, timeout=10)
+                response.raise_for_status()
+                feed = feedparser.parse(response.content)
+            except requests.RequestException as error:
+                logging.warning("SS.lv commercial feed unavailable: %s (%s)", feed_url, error)
+                continue
+        else:
+            feed = feedparser.parse(feed_url)
+            pause_after_source_request()
         district_listings = []
         for entry in feed.entries:
             item_id = entry.get("id") or entry.get("link") or entry.get("title")
@@ -853,9 +873,11 @@ def fetch_ss_full_page(districts, feeds_dict, user_rooms=None, min_price=None, m
 def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_MAX_PAGES):
     if category == "land" and intent != "buy":
         return {}
-    unit_type = {"land": "Land", "apartment": "Apartment", "house": "House"}[category]
+    unit_type = {"land": "Land", "apartment": "Apartment", "house": "House", "commercial": "Commercial"}.get(category)
+    if unit_type is None:
+        return {}
     ts_type = "sale" if intent == "buy" else "rent"
-    listing_type = {"land": "land-lots", "apartment": "apartments", "house": "houses"}[category]
+    listing_type = {"land": "land-lots", "apartment": "apartments", "house": "houses", "commercial": "commercials"}[category]
     listing_intent = "sale" if intent == "buy" else "rent"
     all_listings = {}
 
@@ -909,6 +931,15 @@ def fetch_city24_listings(districts, category, intent, max_pages=CITY24_LATEST_M
                     price_raw = item.get("price")
                     rooms = item.get("room_count")
                     area = item.get("property_size")
+                    if category == "commercial":
+                        expected_transaction = "/transaction_types/1" if intent == "buy" else "/transaction_types/2"
+                        if item.get("unit_type") != "Commercial" or item.get("transaction_type") != expected_transaction:
+                            continue
+                        area = normalize_float(area)
+                        price_raw = normalize_float(price_raw)
+                        if not area or area <= 0 or not price_raw or price_raw <= 0 or not friendly_id:
+                            continue
+                        rooms = None
                     if category == "land":
                         if (item.get("unit_type") != "Land" or item.get("transaction_type") != "/transaction_types/1"
                                 or str(item.get("lot_size_unit_id")) != "1" or not friendly_id or not item.get("id")):
@@ -1003,6 +1034,21 @@ def log_skip_summary(district, skip_counts):
     logging.info(f"{district}: skipped {total} listings ({details})")
 
 def fetch_ss_latest_for_district(category, intent, district):
+    if category == "commercial":
+        template = APARTMENT_BUY_FEEDS.get(district)
+        if not template:
+            return []
+        if intent == "rent":
+            template = template.replace("/sell/", "/hand_over/")
+        listings = {}
+        def load_section(section):
+            url = template.replace("/flats/", f"/{section}/")
+            return fetch_feeds([district], {district: url}).get(district, [])
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for section_listings in executor.map(load_section, SS_COMMERCIAL_SECTIONS):
+                for listing in section_listings:
+                    listings.setdefault(listing["item_id"], listing)
+        return list(listings.values())
     feeds = get_feeds(category, intent)
     return fetch_feeds([district], feeds).get(district, [])
 
@@ -1170,7 +1216,9 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
 
     if source_listings_by_district is None:
         feeds = get_feeds(category, intent)
-        if full_scan:
+        if category == "commercial":
+            ss_listings = {district: fetch_ss_latest_for_district(category, intent, district) for district in user_districts}
+        elif full_scan:
             logging.info(f"Full page scan for {chat_id}")
             ss_listings = fetch_ss_full_page(
                 set(user_districts), feeds,
@@ -1218,6 +1266,8 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
             if category == "land" and (area is None or (
                 listing.get("source") != "City24.lv" and "/plots-and-lands/" not in listing.get("url", "")
             )):
+                continue
+            if category == "commercial" and (area is None or area <= 0 or price <= 0):
                 continue
             if area is not None and not (min_area <= area <= max_area):
                 record_skip(skip_counts, "area_mismatch", f"SKIP area mismatch: area={area}, wanted={min_area}-{max_area}, url={listing.get('url')}")
@@ -1271,8 +1321,8 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
                 heading = f"{address}, {city_name} [{source_badge}]" if city_name else f"{address} [{source_badge}]"
                 price = match.get('price')
                 area = match.get('area')
-                room_line = "" if category == "land" else f"• Istabas: {rooms_str}\n"
-                floor_line = "" if category == "land" else f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n"
+                room_line = f"• Istabas: {rooms_str}\n" if category in RESIDENTIAL_CATEGORIES else ""
+                floor_line = f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n" if category in RESIDENTIAL_CATEGORIES else ""
                 message += (
                     f"{i}. {icon} {heading}\n"
                     f"• Cena: {format_price(price)}\n"
@@ -1406,8 +1456,9 @@ def browse_listings():
     intent = filters.get("intent", "buy")
     districts = filters.get("districts", [])
     rooms = filters.get("rooms", [])
-    if (category not in ("apartment", "house", "land") or intent not in ("buy", "rent")
-            or (category == "land" and (intent != "buy" or rooms != []))
+    if (category not in ("apartment", "house", "land", "commercial") or intent not in ("buy", "rent")
+            or (category == "land" and intent != "buy")
+            or (category in ("land", "commercial") and rooms != [])
             or not isinstance(districts, list) or not 1 <= len(districts) <= 3
             or any(not isinstance(d, str) or d not in DISTRICT_NAMES for d in districts)
             or not isinstance(rooms, list)

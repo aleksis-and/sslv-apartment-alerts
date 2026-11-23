@@ -206,6 +206,19 @@ class GuestSearchTests(unittest.TestCase):
     def test_requires_internal_key(self):
         self.assertEqual(self.search(authorized=False)[1], 401)
 
+    def test_commercial_rent_matches_both_sources_without_rooms(self):
+        filters = {**self.filters, "category": "commercial", "intent": "rent", "rooms": []}
+        office = {"item_id": "office", "price": 300, "area": 100, "source": "SS.lv"}
+        shop = {"item_id": "shop", "price": 450, "area": 150, "source": "City24.lv"}
+        oversized = {**shop, "item_id": "warehouse", "area": 500}
+        with (
+            patch.object(monitor, "fetch_ss_latest_for_district", return_value=[office]) as ss,
+            patch.object(monitor, "fetch_city24_latest_for_district", return_value=[shop, oversized]) as city24,
+        ):
+            self.assertEqual([item["id"] for item in self.search(filters)["listings"]], ["office", "shop"])
+            ss.assert_called_once_with("commercial", "rent", "centrs")
+            city24.assert_called_once_with("commercial", "rent", "centrs")
+
     def test_guest_can_search_for_land_without_rooms(self):
         filters = {**self.filters, "category": "land", "rooms": []}
         listing = {"item_id": "plot", "price": 300, "area": 150, "rooms": None}
