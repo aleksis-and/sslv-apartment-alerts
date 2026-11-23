@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from itertools import zip_longest
 from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from supabase import create_client
@@ -1510,7 +1511,16 @@ def browse_listings():
                     "url": listing.get("url", ""), "image_url": listing.get("image_url"),
                     "source": listing.get("source", "SS.lv"),
                 }
-        return jsonify({"listings": list(results.values())[:150]})
+        listings = list(results.values())
+        if category == "commercial" and len(listings) > 150:
+            groups = {}
+            for listing in listings:
+                groups.setdefault((listing["district"], listing["source"]), []).append(listing)
+            listings = [
+                listing for batch in zip_longest(*groups.values())
+                for listing in batch if listing is not None
+            ]
+        return jsonify({"listings": listings[:150]})
     except Exception:
         logging.exception("Guest listing search failed")
         return jsonify({"error": "Unable to search listings"}), 502
