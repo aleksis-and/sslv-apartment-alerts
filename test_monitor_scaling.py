@@ -206,6 +206,17 @@ class GuestSearchTests(unittest.TestCase):
     def test_requires_internal_key(self):
         self.assertEqual(self.search(authorized=False)[1], 401)
 
+    def test_guest_can_search_for_land_without_rooms(self):
+        filters = {**self.filters, "category": "land", "rooms": []}
+        listing = {"item_id": "plot", "price": 300, "area": 150, "rooms": None}
+        with (
+            patch.object(monitor, "fetch_ss_latest_for_district", return_value=[listing]) as fetch,
+            patch.object(monitor, "fetch_city24_latest_for_district", return_value=[]),
+        ):
+            self.assertEqual(self.search(filters)["listings"][0]["id"], "plot")
+            fetch.assert_called_once_with("land", "buy", "centrs")
+        self.assertEqual(self.search({**filters, "intent": "rent"})[1], 400)
+
     def test_rejects_invalid_districts_and_ranges_before_fetching(self):
         for update in ({"districts": ["../private"]}, {"districts": ["centrs"] * 4},
                        {"min_price": 600}, {"rooms": [True]}, {"max_area": float("nan")}):

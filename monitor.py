@@ -1406,7 +1406,8 @@ def browse_listings():
     intent = filters.get("intent", "buy")
     districts = filters.get("districts", [])
     rooms = filters.get("rooms", [])
-    if (category not in ("apartment", "house") or intent not in ("buy", "rent")
+    if (category not in ("apartment", "house", "land") or intent not in ("buy", "rent")
+            or (category == "land" and (intent != "buy" or rooms != []))
             or not isinstance(districts, list) or not 1 <= len(districts) <= 3
             or any(not isinstance(d, str) or d not in DISTRICT_NAMES for d in districts)
             or not isinstance(rooms, list)
@@ -1416,7 +1417,7 @@ def browse_listings():
     for field, default in (("min_price", 0), ("max_price", 10000000),
                            ("min_area", 0), ("max_area", 10000)):
         value = filters.get(field, default)
-        if type(value) not in (int, float) or not 0 <= value <= 10000000:
+        if type(value) not in (int, float) or not 0 <= value <= 2147483647:
             return jsonify({"error": "Invalid range"}), 400
         bounds[field] = value
     if bounds["min_price"] > bounds["max_price"] or bounds["min_area"] > bounds["max_area"]:
