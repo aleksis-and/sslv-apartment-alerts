@@ -2,6 +2,7 @@ import re
 import os
 import html
 import hmac
+import hashlib
 import logging
 import threading
 import time
@@ -485,12 +486,26 @@ def save_listings_to_db(user, matches, district_names):
 CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali"}
 CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱"}
 
-def build_email_html(matches, category, intent, district_names):
+def email_unsubscribe_url(alert_id):
+    if not RUN_FOR_USER_API_KEY or not alert_id:
+        raise ValueError("Internal API key and alert ID are required for email unsubscribe links")
+    payload = f"email-alert-unsubscribe:v1:{alert_id}"
+    signature = hmac.new(RUN_FOR_USER_API_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"https://pazinojumi.lv/unsubscribe#token=v1.{alert_id}.{signature}"
+
+
+def build_email_html(matches, category, intent, district_names, unsubscribe_url=None):
     category_lv = CATEGORY_NAMES.get(category, "sludinājumi")
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = CATEGORY_ICONS.get(category, "🏠")
     items_html = ""
     safe_district_names = escape_html(district_names)
+    unsubscribe_footer = ""
+    if unsubscribe_url:
+        unsubscribe_footer = (
+            f'<a href="{escape_html(unsubscribe_url)}" style="color:#f5a623;">'
+            'Atteikties no šī paziņojuma</a>'
+        )
     for match in matches:
         rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
         source = match.get('source', 'SS.lv')
@@ -532,7 +547,7 @@ def build_email_html(matches, category, intent, district_names):
             </div>
             {items_html}
             <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #f0ece4;">
-                <p style="color:#bbb;font-size:11px;">Atteikties no paziņojumiem — <a href="https://pazinojumi.lv" style="color:#f5a623;">pazinojumi.lv</a></p>
+                <p style="color:#bbb;font-size:11px;">{unsubscribe_footer}</p>
             </div>
         </div>
     </body>
@@ -1223,8 +1238,15 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
 
         if channel == "email" and email:
+            current = (
+                supabase_admin.table("users").select("id")
+                .eq("id", user["id"]).eq("channel", "email").eq("active", True).execute()
+            )
+            if not current.data:
+                logging.info("Email alert was deactivated before delivery")
+                return
             subject = f"Jauni {category_lv} {intent_lv} — {district_names}"
-            html = build_email_html(matches, category, intent, district_names)
+            html = build_email_html(matches, category, intent, district_names, email_unsubscribe_url(user["id"]))
             send_email_message(email, subject, html)
 
         elif channel == "push":
