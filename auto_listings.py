@@ -102,7 +102,6 @@ def matches_auto(listing, filters, specs=None):
     for bound, key, minimum in (
         ("min_year", "year", True), ("max_year", "year", False),
         ("min_liters", "liters", True), ("max_liters", "liters", False),
-        ("min_mileage", "mileage", True), ("max_mileage", "mileage", False),
     ):
         target = filters.get(bound)
         if target is not None and (type(target) not in (int, float) or data[key] is None
