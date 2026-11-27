@@ -4,6 +4,15 @@ from auto_listings import matches_auto, parse_sales, read_specs
 
 
 class AutoListingsTest(unittest.TestCase):
+    def test_model_page_has_no_model_column_and_enforces_minimum_mileage(self):
+        body = '''<tr id="tr_1"><td><a class="am" href="/msg/lv/transport/cars/volkswagen/tiguan/abc.html">Auto</a></td>
+          <td class="pp6">2019</td><td class="pp6">2.0</td><td class="pp6">125 tūkst.</td>
+          <td class="pp6">14,000 €</td></tr>'''
+        car, = parse_sales(body, 'volkswagen', 'tiguan')
+        self.assertTrue(matches_auto(car, {'model_slug': 'tiguan', 'min_mileage': 125000}))
+        self.assertFalse(matches_auto(car, {'model_slug': 'tiguan', 'min_mileage': 125001}))
+        self.assertFalse(matches_auto(car, {'model_slug': 'golf-7'}))
+
     def test_sale_rows_keep_only_priced_passenger_cars(self):
         url = '/msg/lv/transport/cars/bmw/530/abc.html'
         row = '''<tr id="tr_123"><td><a class="am" href="{}">Auto</a></td>

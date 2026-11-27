@@ -40,7 +40,7 @@ def normalized_model(value):
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
-def parse_sales(body, make):
+def parse_sales(body, make, selected_model=None):
     parser = SaleRows()
     parser.feed(body)
     for row in parser.rows:
@@ -48,6 +48,11 @@ def parse_sales(body, make):
         if not re.fullmatch(rf"/msg/lv/transport/cars/{re.escape(make)}/[a-z0-9-]+/[a-z]+\.html", path):
             continue
         cells = row["cells"]
+        model_slug = path.split("/")[-2]
+        if selected_model and model_slug != selected_model:
+            continue
+        if len(cells) == 4 and selected_model:
+            cells = [model_slug.replace("-", " ").title(), *cells]
         if len(cells) != 5:
             continue
         model, year, displacement, mileage, price = cells
@@ -63,7 +68,7 @@ def parse_sales(body, make):
             "price": int(re.sub(r"\D", "", price)), "source": "SS.lv",
             "rooms": None, "area": None, "image_url": row.get("image"),
             "auto_data": {
-                "model": model, "model_slug": path.split("/")[-2], "year": int(year),
+                "model": model, "model_slug": model_slug, "year": int(year),
                 "liters": float(liters[0].replace(",", ".")) if liters else None,
                 "mileage": round(float(km[1].replace(",", ".")) * 1000) if km else None,
             },
@@ -89,12 +94,15 @@ def matches_auto(listing, filters, specs=None):
     if not isinstance(raw_model, str):
         return False
     model = normalized_model(raw_model)
-    if model and model not in {normalized_model(data["model"]), normalized_model(data["model_slug"])}:
+    model_slug = filters.get("model_slug")
+    if model_slug and model_slug != data["model_slug"]:
+        return False
+    if not model_slug and model and model not in {normalized_model(data["model"]), normalized_model(data["model_slug"])}:
         return False
     for bound, key, minimum in (
         ("min_year", "year", True), ("max_year", "year", False),
         ("min_liters", "liters", True), ("max_liters", "liters", False),
-        ("max_mileage", "mileage", False),
+        ("min_mileage", "mileage", True), ("max_mileage", "mileage", False),
     ):
         target = filters.get(bound)
         if target is not None and (type(target) not in (int, float) or data[key] is None

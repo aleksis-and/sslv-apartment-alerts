@@ -1044,11 +1044,12 @@ def log_skip_summary(district, skip_counts):
 
 def fetch_ss_latest_for_district(category, intent, district):
     if category == "auto":
-        if not re.fullmatch(r"[a-z0-9-]{1,40}", district):
+        if not re.fullmatch(r"[a-z0-9-]{1,40}(?:/[a-z0-9-]{1,40})?", district):
             return []
         response = source_get(f"https://www.ss.lv/lv/transport/cars/{district}/sell/", timeout=10)
         response.raise_for_status()
-        return list(parse_sales(response.text, district))
+        make, _, model = district.partition("/")
+        return list(parse_sales(response.text, make, model or None))
     if category == "commercial":
         template = APARTMENT_BUY_FEEDS.get(district)
         if not template:
@@ -1091,7 +1092,12 @@ def listing_groups(user):
     if user.get("category") == "auto":
         filters = user.get("auto_filters")
         make = filters.get("make") if isinstance(filters, dict) else None
-        return [make] if isinstance(make, str) and re.fullmatch(r"[a-z0-9-]{1,40}", make) else []
+        if not isinstance(make, str) or not re.fullmatch(r"[a-z0-9-]{1,40}", make):
+            return []
+        model = filters.get("model_slug")
+        if model is not None:
+            return [f"{make}/{model}"] if isinstance(model, str) and re.fullmatch(r"[a-z0-9-]{1,40}", model) else []
+        return [make]
     return normalize_district_filters(user.get("districts", []))
 
 def build_latest_fetch_keys(users):
@@ -1327,6 +1333,9 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
         intent_lv = "pārdošanā" if intent == "buy" else "īrei"
         icon = CATEGORY_ICONS.get(category, "🏠")
         district_names = ", ".join([DISTRICT_NAMES.get(d, d) for d in user_districts])
+        if category == "auto":
+            auto = user["auto_filters"]
+            district_names = " ".join(part for part in (auto["make"].replace("-", " ").title(), auto.get("model")) if isinstance(part, str) and part)
 
         if channel == "email" and email:
             current = (
