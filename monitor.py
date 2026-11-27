@@ -457,7 +457,7 @@ def send_push_notification(push_token, title, body, chat_id=None):
         logging.error(f"Push error for {chat_id or 'unknown user'}: {e}")
         return False
 
-def save_listings_to_db(user, matches, district_names):
+def save_listings_to_db(user, matches, district_names, required=False):
     global supabase_admin
     user_id = user.get("id")
     auth_user_id = user.get("auth_user_id")
@@ -485,6 +485,8 @@ def save_listings_to_db(user, matches, district_names):
             logging.info(f"Saved {len(rows)} listings to DB for user {user_id}")
         except Exception as e:
             logging.error(f"Failed to save listings to DB: {e}")
+            if required:
+                raise
 
 CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali", "commercial": "komerctelpas", "auto": "auto"}
 CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱", "commercial": "🏢"}
@@ -506,7 +508,7 @@ def email_unsubscribe_url(alert_id):
     return f"https://pazinojumi.lv/unsubscribe#token=v1.{alert_id}.{signature}"
 
 
-def build_email_html(matches, category, intent, district_names, unsubscribe_url=None):
+def build_email_html(matches, category, intent, district_names, unsubscribe_url=None, results_url=None):
     category_lv = CATEGORY_NAMES.get(category, "sludinājumi")
     intent_lv = "pārdošanā" if intent == "buy" else "īrei"
     icon = CATEGORY_ICONS.get(category, "🏠")
@@ -518,7 +520,8 @@ def build_email_html(matches, category, intent, district_names, unsubscribe_url=
             f'<a href="{escape_html(unsubscribe_url)}" style="color:#f5a623;">'
             'Atteikties no šī paziņojuma</a>'
         )
-    for match in matches:
+    visible_matches = matches[:10] if results_url else matches
+    for match in visible_matches:
         rooms_str = clean_text(match['rooms']) if match['rooms'] is not None else "Nav"
         source = match.get('source', 'SS.lv')
         source_badge = "City24" if source == "City24.lv" else clean_text(source or "SS.lv")
@@ -554,6 +557,10 @@ def build_email_html(matches, category, intent, district_names, unsubscribe_url=
             <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
         """
+    results_link = (
+        f'<p><a href="{escape_html(results_url)}" style="color:#9a5700;font-weight:700;">Skatīt visus sludinājumus →</a></p>'
+        if results_url else ""
+    )
     return f"""
     <!DOCTYPE html>
     <html>
@@ -563,9 +570,13 @@ def build_email_html(matches, category, intent, district_names, unsubscribe_url=
             <div style="text-align:center;margin-bottom:24px;">
                 <h1 style="font-size:22px;font-weight:700;color:#1a1a1a;margin:0;">Jauni {category_lv} {intent_lv}</h1>
                 <p style="color:#888;font-size:14px;margin-top:6px;">📍 {safe_district_names}</p>
+                <p>Atrasti {len(matches)} atbilstoši sludinājumi.</p>
+                {results_link}
+                <p style="font-size:12px;">{unsubscribe_footer}</p>
             </div>
             {items_html}
             <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #f0ece4;">
+                {results_link}
                 <p style="color:#bbb;font-size:11px;">{unsubscribe_footer}</p>
             </div>
         </div>
@@ -1367,7 +1378,10 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
                 logging.info("Email alert was deactivated before delivery")
                 return
             subject = f"Jauni {category_lv} {intent_lv} — {district_names}"
-            html = build_email_html(matches, category, intent, district_names, email_unsubscribe_url(user["id"]))
+            save_listings_to_db(user, matches, district_names, required=True)
+            unsubscribe_url = email_unsubscribe_url(user["id"])
+            results_url = unsubscribe_url.replace("/unsubscribe#", "/results#")
+            html = build_email_html(matches, category, intent, district_names, unsubscribe_url, results_url)
             send_email_message(email, subject, html)
 
         elif channel == "push":

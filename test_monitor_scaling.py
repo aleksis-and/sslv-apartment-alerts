@@ -80,6 +80,19 @@ import monitor
 
 
 class SharedLatestFetchTests(unittest.TestCase):
+    def test_email_limits_preview_without_losing_total_or_results_link(self):
+        listing = {"title": "Auto", "street": "Auto", "price": 20000, "rooms": None,
+                   "area": None, "url": "https://www.ss.lv/msg/example.html",
+                   "auto_data": {"year": 2020, "liters": 2, "mileage": 150000}}
+        body = monitor.build_email_html([listing] * 63, "auto", "buy", "Tiguan",
+                                       "https://pazinojumi.lv/unsubscribe#token=test",
+                                       "https://pazinojumi.lv/results#token=test")
+        self.assertEqual(body.count("Skatīt sludinājumu →"), 10)
+        self.assertIn("Atrasti 63", body)
+        self.assertIn("/results#token=test", body)
+        self.assertLess(body.index("Atteikties no šī"), body.index("Skatīt sludinājumu →"))
+        self.assertLess(len(body.encode("utf-8")), 80000)
+
     def test_auto_initial_scan_reads_following_pages_without_duplicates(self):
         base = "/lv/transport/cars/volkswagen/tiguan/sell/"
         def row(id, slug):
