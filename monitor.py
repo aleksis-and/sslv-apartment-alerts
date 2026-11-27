@@ -1042,14 +1042,32 @@ def log_skip_summary(district, skip_counts):
     details = ", ".join(f"{reason}={count}" for reason, count in sorted(skip_counts.items()))
     logging.info(f"{district}: skipped {total} listings ({details})")
 
+def fetch_ss_auto_sales(group, max_pages=1):
+    if not re.fullmatch(r"[a-z0-9-]{1,40}(?:/[a-z0-9-]{1,40})?", group):
+        return []
+    base = f"/lv/transport/cars/{group}/sell/"
+    make, _, model = group.partition("/")
+    listings = {}
+    for page in range(1, max(1, max_pages) + 1):
+        path = base if page == 1 else f"{base}page{page}.html"
+        try:
+            response = source_get("https://www.ss.lv" + path, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException:
+            if page == 1:
+                raise
+            logging.warning("SS.lv auto pagination stopped at %s", path)
+            break
+        for item in parse_sales(response.text, make, model or None):
+            listings.setdefault(item["item_id"], item)
+        if f'href="{base}page{page + 1}.html"' not in response.text:
+            break
+    return list(listings.values())
+
+
 def fetch_ss_latest_for_district(category, intent, district):
     if category == "auto":
-        if not re.fullmatch(r"[a-z0-9-]{1,40}(?:/[a-z0-9-]{1,40})?", district):
-            return []
-        response = source_get(f"https://www.ss.lv/lv/transport/cars/{district}/sell/", timeout=10)
-        response.raise_for_status()
-        make, _, model = district.partition("/")
-        return list(parse_sales(response.text, make, model or None))
+        return fetch_ss_auto_sales(district)
     if category == "commercial":
         template = APARTMENT_BUY_FEEDS.get(district)
         if not template:
@@ -1261,7 +1279,10 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
 
     if source_listings_by_district is None:
         feeds = get_feeds(category, intent)
-        if category in ("commercial", "auto"):
+        if category == "auto":
+            pages = SS_FULL_SCAN_MAX_PAGES if full_scan and channel != "telegram" else 1
+            ss_listings = {group: fetch_ss_auto_sales(group, pages) for group in user_districts}
+        elif category == "commercial":
             ss_listings = {district: fetch_ss_latest_for_district(category, intent, district) for district in user_districts}
         elif full_scan:
             logging.info(f"Full page scan for {chat_id}")

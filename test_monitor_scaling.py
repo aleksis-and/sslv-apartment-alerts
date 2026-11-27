@@ -2,7 +2,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_KEY", "anon-test-key")
@@ -80,6 +80,20 @@ import monitor
 
 
 class SharedLatestFetchTests(unittest.TestCase):
+    def test_auto_initial_scan_reads_following_pages_without_duplicates(self):
+        base = "/lv/transport/cars/volkswagen/tiguan/sell/"
+        def row(id, slug):
+            return f'''<tr id="tr_{id}"><td><a class="am" href="/msg/lv/transport/cars/volkswagen/tiguan/{slug}.html">Auto</a></td>
+              <td class="pp6">2020</td><td class="pp6">2.0D</td><td class="pp6">-</td><td class="pp6">20,000 €</td></tr>'''
+        first, second = Mock(), Mock()
+        first.text = row(1, "aaa") + f'<a href="{base}page2.html">2</a>'
+        second.text = row(1, "aaa") + row(2, "bbb")
+        with patch.object(monitor, "source_get", side_effect=[first, second]) as get:
+            matches = monitor.fetch_ss_auto_sales("volkswagen/tiguan", 20)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(len(matches), 2)
+        self.assertTrue(get.call_args.args[0].endswith("/sell/page2.html"))
+
     def test_shared_latest_fetches_each_source_district_once_for_overlapping_users(self):
         users = [
             {
