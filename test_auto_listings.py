@@ -1,0 +1,26 @@
+import unittest
+
+from auto_listings import matches_auto, parse_sales, read_specs
+
+
+class AutoListingsTest(unittest.TestCase):
+    def test_sale_rows_keep_only_priced_passenger_cars(self):
+        url = '/msg/lv/transport/cars/bmw/530/abc.html'
+        row = '''<tr id="tr_123"><td><a class="am" href="{}">Auto</a></td>
+          <td class="msga2-o pp6">530</td><td class="msga2-o pp6">2019</td>
+          <td class="msga2-o pp6">3.0D</td><td class="msga2-r pp6">150 tūkst.</td>
+          <td class="msga2-o pp6">{}</td></tr>'''
+        cars = list(parse_sales(row.format(url, '23,000 €') + row.format(url, 'pērku'), 'bmw'))
+        self.assertEqual(len(cars), 1)
+        self.assertEqual(cars[0]['price'], 23000)
+        self.assertEqual(cars[0]['auto_data']['mileage'], 150000)
+        self.assertTrue(matches_auto(cars[0], {'model': '530', 'min_liters': 2.5, 'max_year': 2019}))
+        self.assertFalse(matches_auto(cars[0], {'model': '53'}))
+        self.assertFalse(matches_auto(cars[0], {'max_mileage': 149999}))
+
+    def test_engine_and_gearbox_match_independently_of_displacement(self):
+        specs = read_specs('<td id="tdo_15">3.0 dīzelis</td><td id="tdo_35">Automāts 8 ātrumi</td>')
+        listing = {'auto_data': {'model': '530', 'model_slug': '530', 'liters': 3.0}}
+        self.assertTrue(matches_auto(listing, {'engine': 'diesel', 'transmission': 'automatic'}, specs))
+        self.assertFalse(matches_auto(listing, {'engine': 'petrol', 'transmission': 'automatic'}, specs))
+        self.assertFalse(matches_auto(listing, {'transmission': 'manual'}, specs))

@@ -14,6 +14,7 @@ from supabase import create_client
 from apscheduler.schedulers.blocking import BlockingScheduler
 import feedparser
 import requests
+from auto_listings import matches_auto, parse_sales, read_specs
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
@@ -471,7 +472,7 @@ def save_listings_to_db(user, matches, district_names):
             "price": match.get("price"),
             "rooms": match.get("rooms"),
             "area": match.get("area"),
-            "district": district_names,
+            "district": match["title"] if user.get("category") == "auto" else district_names,
             "url": match.get("url", ""),
             "image_url": match.get("image_url"),
             "source": match.get("source", "SS.lv"),
@@ -485,7 +486,7 @@ def save_listings_to_db(user, matches, district_names):
         except Exception as e:
             logging.error(f"Failed to save listings to DB: {e}")
 
-CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali", "commercial": "komerctelpas"}
+CATEGORY_NAMES = {"apartment": "dzīvokļi", "house": "mājas", "land": "zemes gabali", "commercial": "komerctelpas", "auto": "auto"}
 CATEGORY_ICONS = {"apartment": "🏢", "house": "🏡", "land": "🌱", "commercial": "🏢"}
 RESIDENTIAL_CATEGORIES = ("apartment", "house")
 SS_COMMERCIAL_SECTIONS = (
@@ -531,17 +532,24 @@ def build_email_html(matches, category, intent, district_names, unsubscribe_url=
         safe_floor = escape_html(match.get('floor') or 'Nav')
         safe_url = escape_html(match.get('url') or '#')
         property_rows = []
-        if category in RESIDENTIAL_CATEGORIES:
+        if category == "auto":
+            data = match["auto_data"]
+            property_rows = [("Gads", data["year"])]
+            if data["liters"] is not None:
+                property_rows.append(("Tilpums", f'{data["liters"]} l'))
+            if data["mileage"] is not None:
+                property_rows.append(("Nobraukums", f'{data["mileage"]:,} km'.replace(",", " ")))
+        elif category in RESIDENTIAL_CATEGORIES:
             property_rows = [("Istabas", safe_rooms), ("Stāvs", safe_floor)]
+        if category != "auto":
+            property_rows.extend([("Cena/m²", format_price_per_sqm(price, area)), ("Platība", format_area(area))])
         detail_rows = "".join(f'<tr><td style="color:#888">{label}</td><td>{value}</td></tr>' for label, value in property_rows)
         items_html += f"""
         <div style="background:#fff;border:1px solid #f0ece4;border-radius:12px;padding:20px 18px;margin:0 auto 14px auto;max-width:520px;text-align:center;">
             <p style="font-size:15px;font-weight:700;color:#1a1a1a;margin:0 0 12px 0;line-height:1.35;">{icon} {safe_heading}</p>
             <table style="margin:0 auto;border-collapse:collapse;text-align:left;">
                 <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena</td><td style="font-size:13px;font-weight:600;color:#1a1a1a;padding:4px 0;">{format_price(price)}</td></tr>
-                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Cena/m²</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_price_per_sqm(price, area)}</td></tr>
                 {detail_rows}
-                <tr><td style="color:#888;font-size:13px;padding:4px 18px 4px 0;">Platība</td><td style="font-size:13px;color:#1a1a1a;padding:4px 0;">{format_area(area)}</td></tr>
             </table>
             <a href="{safe_url}" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#f5a623;color:#fff;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600;">Skatīt sludinājumu →</a>
         </div>
@@ -1035,6 +1043,12 @@ def log_skip_summary(district, skip_counts):
     logging.info(f"{district}: skipped {total} listings ({details})")
 
 def fetch_ss_latest_for_district(category, intent, district):
+    if category == "auto":
+        if not re.fullmatch(r"[a-z0-9-]{1,40}", district):
+            return []
+        response = source_get(f"https://www.ss.lv/lv/transport/cars/{district}/sell/", timeout=10)
+        response.raise_for_status()
+        return list(parse_sales(response.text, district))
     if category == "commercial":
         template = APARTMENT_BUY_FEEDS.get(district)
         if not template:
@@ -1054,14 +1068,38 @@ def fetch_ss_latest_for_district(category, intent, district):
     return fetch_feeds([district], feeds).get(district, [])
 
 def fetch_city24_latest_for_district(category, intent, district):
+    if category == "auto":
+        return []
     return fetch_city24_listings([district], category, intent, max_pages=CITY24_LATEST_MAX_PAGES).get(district, [])
+
+def auto_matches(listing, filters):
+    if not matches_auto(listing, filters):
+        return False
+    if not filters.get("engine") and not filters.get("transmission"):
+        return True
+    if "specs" not in listing:
+        try:
+            response = source_get(listing["url"], timeout=8)
+            response.raise_for_status()
+            listing["specs"] = read_specs(response.text)
+        except requests.RequestException:
+            logging.warning("Unable to load auto details for %s", listing["url"])
+            return False
+    return matches_auto(listing, filters, listing["specs"])
+
+def listing_groups(user):
+    if user.get("category") == "auto":
+        filters = user.get("auto_filters")
+        make = filters.get("make") if isinstance(filters, dict) else None
+        return [make] if isinstance(make, str) and re.fullmatch(r"[a-z0-9-]{1,40}", make) else []
+    return normalize_district_filters(user.get("districts", []))
 
 def build_latest_fetch_keys(users):
     keys = set()
     for user in users:
         category = user.get("category", "apartment")
         intent = user.get("intent", "buy")
-        for district in normalize_district_filters(user.get("districts", [])):
+        for district in listing_groups(user):
             keys.add((category, intent, district))
     return sorted(keys)
 
@@ -1101,7 +1139,7 @@ def listings_for_user_from_cache(user, cache):
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
     listings_by_district = {}
-    for district in normalize_district_filters(user.get("districts", [])):
+    for district in listing_groups(user):
         listings_by_district[district] = (
             list(cache.get(("ss", category, intent, district), []))
             + list(cache.get(("city24", category, intent, district), []))
@@ -1209,7 +1247,7 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
     min_area = normalize_filter_float(user.get("min_area"), 0)
     max_area = normalize_filter_float(user.get("max_area"), 9999)
     user_rooms = normalize_room_filters(user.get("rooms"))
-    user_districts = normalize_district_filters(user.get("districts", []))
+    user_districts = listing_groups(user)
     category = user.get("category", "apartment")
     intent = user.get("intent", "buy")
     channel = user.get("channel", "telegram")
@@ -1217,7 +1255,7 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
 
     if source_listings_by_district is None:
         feeds = get_feeds(category, intent)
-        if category == "commercial":
+        if category in ("commercial", "auto"):
             ss_listings = {district: fetch_ss_latest_for_district(category, intent, district) for district in user_districts}
         elif full_scan:
             logging.info(f"Full page scan for {chat_id}")
@@ -1232,7 +1270,7 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
         else:
             ss_listings = fetch_feeds(set(user_districts), feeds)
 
-        city24_listings = fetch_city24_listings(user_districts, category, intent)
+        city24_listings = {} if category == "auto" else fetch_city24_listings(user_districts, category, intent)
         source_listings_by_district = merge_listings_by_district(user_districts, ss_listings, city24_listings)
 
     seen = load_seen_for_user(chat_id)
@@ -1263,6 +1301,8 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
                 continue
             if not (min_price <= price <= max_price):
                 record_skip(skip_counts, "price_mismatch", f"SKIP price mismatch: price={price}, wanted={min_price}-{max_price}, url={listing.get('url')}")
+                continue
+            if category == "auto" and not auto_matches(listing, user.get("auto_filters") or {}):
                 continue
             if category == "land" and (area is None or (
                 listing.get("source") != "City24.lv" and "/plots-and-lands/" not in listing.get("url", "")
@@ -1324,13 +1364,14 @@ def process_user(user, full_scan=False, source_listings_by_district=None):
                 area = match.get('area')
                 room_line = f"• Istabas: {rooms_str}\n" if category in RESIDENTIAL_CATEGORIES else ""
                 floor_line = f"• Stāvs: {clean_text(match.get('floor') or 'Nav')}\n" if category in RESIDENTIAL_CATEGORIES else ""
+                property_lines = "" if category == "auto" else (
+                    f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
+                    f"{room_line}• Platība: {format_area(area)}\n{floor_line}"
+                )
                 message += (
                     f"{i}. {icon} {heading}\n"
                     f"• Cena: {format_price(price)}\n"
-                    f"• Cena/m²: {format_price_per_sqm(price, area)}\n"
-                    f"{room_line}"
-                    f"• Platība: {format_area(area)}\n"
-                    f"{floor_line}"
+                    f"{property_lines}"
                     f"• Skatīt sludinājumu: {clean_text(match.get('url'))}\n\n"
                 )
             send_telegram_message(chat_id, message.strip())
@@ -1457,11 +1498,16 @@ def browse_listings():
     intent = filters.get("intent", "buy")
     districts = filters.get("districts", [])
     rooms = filters.get("rooms", [])
-    if (category not in ("apartment", "house", "land", "commercial") or intent not in ("buy", "rent")
+    auto = category == "auto"
+    if auto:
+        if not isinstance(filters.get("auto_filters"), dict) or intent != "buy" or rooms != []:
+            return jsonify({"error": "Invalid auto filters"}), 400
+        districts = listing_groups(filters)
+    if (category not in ("apartment", "house", "land", "commercial", "auto") or intent not in ("buy", "rent")
             or (category == "land" and intent != "buy")
             or (category in ("land", "commercial") and rooms != [])
             or not isinstance(districts, list) or not 1 <= len(districts) <= 3
-            or any(not isinstance(d, str) or d not in DISTRICT_NAMES for d in districts)
+            or (not auto and any(not isinstance(d, str) or d not in DISTRICT_NAMES for d in districts))
             or not isinstance(rooms, list)
             or any(type(r) is not int or r < 1 or r > 6 for r in rooms)):
         return jsonify({"error": "Invalid filters; select up to three districts"}), 400
@@ -1497,7 +1543,9 @@ def browse_listings():
                 room = normalize_room_value(listing.get("rooms"))
                 if price is None or not bounds["min_price"] <= price <= bounds["max_price"]:
                     continue
-                if area is None or not bounds["min_area"] <= area <= bounds["max_area"]:
+                if auto and not auto_matches(listing, filters["auto_filters"]):
+                    continue
+                if not auto and (area is None or not bounds["min_area"] <= area <= bounds["max_area"]):
                     continue
                 if rooms and (room is None or not any(room >= 6 if r == 6 else room == r for r in rooms)):
                     continue
@@ -1507,7 +1555,7 @@ def browse_listings():
                 # Explicit projection prevents account or delivery metadata entering guest responses.
                 results[item_id] = {
                     "id": item_id, "title": listing.get("title", ""), "price": price,
-                    "rooms": room, "area": area, "district": DISTRICT_NAMES[district],
+                    "rooms": room, "area": area, "district": listing["title"] if auto else DISTRICT_NAMES[district],
                     "url": listing.get("url", ""), "image_url": listing.get("image_url"),
                     "source": listing.get("source", "SS.lv"),
                 }

@@ -230,6 +230,19 @@ class GuestSearchTests(unittest.TestCase):
             fetch.assert_called_once_with("land", "buy", "centrs")
         self.assertEqual(self.search({**filters, "intent": "rent"})[1], 400)
 
+    def test_guest_auto_search_uses_make_without_districts_or_area(self):
+        filters = {**self.filters, "category": "auto", "districts": [], "rooms": [],
+                   "auto_filters": {"make": "bmw", "min_liters": 2.5, "engine": "diesel"}}
+        car = {"item_id": "car", "title": "BMW 530", "price": 300, "area": None,
+               "auto_data": {"model": "530", "model_slug": "530", "liters": 3},
+               "specs": {"engine": "diesel"}}
+        wrong_engine = {**car, "item_id": "petrol", "specs": {"engine": "petrol"}}
+        with patch.object(monitor, "fetch_ss_latest_for_district", return_value=[car, wrong_engine]) as fetch:
+            result = self.search(filters)
+            self.assertEqual([listing["id"] for listing in result["listings"]], ["car"])
+            fetch.assert_called_once_with("auto", "buy", "bmw")
+            self.assertEqual(monitor.build_latest_fetch_keys([filters]), [("auto", "buy", "bmw")])
+
     def test_rejects_invalid_districts_and_ranges_before_fetching(self):
         for update in ({"districts": ["../private"]}, {"districts": ["centrs"] * 4},
                        {"min_price": 600}, {"rooms": [True]}, {"max_area": float("nan")}):
